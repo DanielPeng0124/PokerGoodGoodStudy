@@ -1,0 +1,127 @@
+import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { PokerSocket } from '../api/ws';
+import { getRoom } from '../api/http';
+import { usePokerStore } from '../store/usePokerStore';
+import { PokerTable } from '../components/PokerTable';
+import { ActionPanel } from '../components/ActionPanel';
+import { ChatPanel } from '../components/ChatPanel';
+import type { ClientAction } from '../types/game';
+
+export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => void }) {
+  const { userId, name, room, setUser, setRoom, chats, handleMessage, connected, setConnected, error, clearError } = usePokerStore();
+  const ws = useRef(new PokerSocket());
+  const [sitForm, setSitForm] = useState<{ seat: number; name: string; buyIn: number }>();
+  const [sitError, setSitError] = useState('');
+
+  const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => s.userId === userId)?.index, [room, userId]);
+  const duplicateSitName = useMemo(() => {
+    if (!room || !sitForm) return false;
+    const nextName = normalizeName(sitForm.name);
+    if (!nextName) return false;
+    return Object.values(room.seats).some((seat) => normalizeName(seat.name ?? '') === nextName);
+  }, [room, sitForm]);
+
+  useEffect(() => {
+    getRoom(roomId, userId, name).then(setRoom).catch(console.error);
+    ws.current.connect(roomId, userId, name, handleMessage, () => setConnected(false));
+    setConnected(true);
+    return () => ws.current.close();
+  }, [roomId, userId, setRoom, handleMessage, setConnected]);
+
+  useEffect(() => {
+    if (mySeat === undefined || !room) return;
+    const seatedName = room.seats[String(mySeat)]?.name;
+    if (seatedName) setUser(seatedName);
+    setSitForm(undefined);
+    setSitError('');
+  }, [mySeat, room, setUser]);
+
+  function sit(seat: number) {
+    if (!room || mySeat !== undefined) return;
+    setSitForm({ seat, name, buyIn: room.settings.minBuyIn });
+    setSitError('');
+  }
+
+  function submitSit(e: FormEvent) {
+    e.preventDefault();
+    if (!sitForm) return;
+    const sitName = sitForm.name.trim();
+    if (!sitName) {
+      setSitError('Name is required');
+      return;
+    }
+    if (duplicateSitName) {
+      setSitError('Name already taken');
+      return;
+    }
+    ws.current.sitDown(sitForm.seat, sitForm.buyIn, sitName);
+  }
+
+  function action(a: ClientAction) { ws.current.action(a); }
+
+  if (!room) return <main className="loading">加载房间中...</main>;
+
+  return (
+    <main className="game-page">
+      <header className="topbar">
+        <div>
+          <h2>Room {room.id.slice(0, 8)}</h2>
+          <small>{connected ? '已连接' : '未连接'} · {name}</small>
+        </div>
+        <div className="top-actions">
+          <button onClick={() => navigator.clipboard.writeText(room.id)}>复制房间 ID</button>
+          <button onClick={onLeave}>离开</button>
+        </div>
+      </header>
+      {error && <div className="error" onClick={clearError}>{error}</div>}
+      <div className="layout">
+        <div>
+          <PokerTable room={room} myUserId={userId} onSit={sit} />
+          <ActionPanel game={room.game} mySeat={mySeat} onStart={() => ws.current.startGame()} onAction={action} onSkipTurn={() => ws.current.skipTurn()} />
+        </div>
+        <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
+      </div>
+      {sitForm && (
+        <div className="sit-modal-backdrop" onClick={() => setSitForm(undefined)}>
+          <form className="sit-modal" onSubmit={submitSit} onClick={(e) => e.stopPropagation()}>
+            <h3>Seat {sitForm.seat + 1}</h3>
+            <label>
+              Name
+              <input
+                autoFocus
+                required
+                placeholder="Please enter your real name"
+                value={sitForm.name}
+                onChange={(e) => {
+                  setSitError('');
+                  setSitForm((current) => current ? { ...current, name: e.target.value } : current);
+                }}
+              />
+            </label>
+            <p className="form-hint">Name is required. A real recognizable name is better.</p>
+            {(sitError || duplicateSitName) && <div className="sit-modal-error">{sitError || 'Name already taken'}</div>}
+            <label>
+              Chips
+              <input
+                type="number"
+                required
+                min={room.settings.minBuyIn}
+                max={room.settings.maxBuyIn}
+                value={sitForm.buyIn}
+                onChange={(e) => setSitForm((current) => current ? { ...current, buyIn: Number(e.target.value) } : current)}
+              />
+            </label>
+            <div className="sit-modal-actions">
+              <button type="button" onClick={() => setSitForm(undefined)}>Cancel</button>
+              <button type="submit" disabled={duplicateSitName}>Sit Down</button>
+            </div>
+          </form>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function normalizeName(value: string) {
+  return value.trim().toLowerCase();
+}
