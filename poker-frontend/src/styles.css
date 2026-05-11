@@ -18,13 +18,23 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .home-card input { width: 100%; margin: 8px 0; padding: 13px 15px; color: #fff; border: 1px solid rgba(255,255,255,.16); border-radius: 14px; background: rgba(255,255,255,.08); }
 .home-card button, .primary { width: 100%; margin-top: 10px; padding: 13px 16px; color: #03130b; font-weight: 800; border-radius: 16px; background: linear-gradient(135deg, #ffdb70, #38f29b); box-shadow: 0 10px 32px rgba(56,242,155,.22); }
 .game-page { height: 100vh; padding: 18px; display: flex; flex-direction: column; }
-.topbar { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 14px 18px; border: 1px solid rgba(255,255,255,.1); border-radius: 22px; background: rgba(4, 14, 10, .74); backdrop-filter: blur(10px); }
+.topbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 18px; padding: 14px 18px; border: 1px solid rgba(255,255,255,.1); border-radius: 22px; background: rgba(4, 14, 10, .74); backdrop-filter: blur(10px); }
 .topbar h2 { margin: 0; }
 .topbar small { color: #a8beb5; }
-.top-actions { display: flex; align-items: center; gap: 10px; }
+.top-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 10px; }
 .top-actions label { display: flex; align-items: center; gap: 8px; color: #bdd2ca; }
 .top-actions input { width: 95px; padding: 9px; color: #fff; border: 1px solid rgba(255,255,255,.14); border-radius: 12px; background: rgba(255,255,255,.07); }
 .top-actions button { padding: 10px 14px; color: #fff; border-radius: 14px; background: rgba(255,255,255,.11); }
+.top-status { padding: 8px 10px; color: #03130b; border-radius: 999px; background: #ffdb70; font-size: 12px; font-weight: 900; white-space: nowrap; }
+.top-status.ending { background: #a7f3d0; }
+.top-status.pending { color: #dceee7; background: rgba(255,255,255,.14); }
+.owner-control.active { color: #03130b; background: #38f29b; }
+.owner-control.danger { background: rgba(239, 68, 68, .75); }
+@media (max-width: 700px) {
+  .top-actions { width: 100%; justify-content: flex-start; gap: 8px; }
+  .top-actions button { padding: 9px 10px; border-radius: 12px; }
+  .top-status { padding: 7px 9px; }
+}
 .error { margin: 12px 0; padding: 12px 14px; color: #ffd7d7; border: 1px solid rgba(255, 90, 90, .35); border-radius: 16px; background: rgba(80, 9, 9, .48); }
 .sit-modal-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 18px; background: rgba(0,0,0,.58); }
 .sit-modal { width: min(380px, 100%); padding: 20px; border: 1px solid rgba(255,255,255,.12); border-radius: 22px; background: rgba(4,14,10,.96); box-shadow: 0 28px 90px rgba(0,0,0,.55); }
@@ -97,9 +107,12 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .action-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .action-buttons button, .raise-row button, .ghost { padding: 13px; color: #fff; border-radius: 16px; background: rgba(255,255,255,.12); font-weight: 800; }
 .action-buttons button:first-child { background: rgba(239,68,68,.75); }
-.raise-row { display: grid; grid-template-columns: 1fr 110px 140px; gap: 10px; margin-top: 10px; }
+.raise-row { display: grid; grid-template-columns: minmax(140px, .75fr) 168px 86px 112px; gap: 10px; margin-top: 10px; align-items: center; }
+.raise-row input[type='range'] { min-width: 0; }
 .raise-row input[type='number'] { padding: 10px; color: #fff; border: 1px solid rgba(255,255,255,.13); border-radius: 14px; background: rgba(255,255,255,.08); }
 .raise-row button { color: #03130b; background: linear-gradient(135deg, #38f29b, #80ffe8); }
+.quick-bets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.quick-bets button { padding: 10px 8px; color: #dceee7; border-radius: 12px; background: rgba(255,255,255,.1); }
 .ghost { width: 100%; margin-top: 10px; border: 1px dashed rgba(255,255,255,.22); background: rgba(255,255,255,.06); color: #bcd2c9; }
 .side-panel { height: auto; min-height: 0; display: flex; flex-direction: column; border: 1px solid rgba(255,255,255,.11); border-radius: 26px; background: rgba(4,14,10,.78); overflow: hidden; }
 .side-tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; padding: 10px; border-bottom: 1px solid rgba(255,255,255,.09); background: rgba(0,0,0,.16); }

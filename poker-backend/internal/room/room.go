@@ -72,6 +72,8 @@ type Room struct {
 	Seats    map[int]*Seat      `json:"seats"`
 	Game     *game.GameState    `json:"game,omitempty"`
 	Engine   *game.Engine       `json:"-"`
+	Paused   bool               `json:"paused"`
+	Ending   bool               `json:"endingAfterHand"`
 
 	nextHandNumber         int
 	lastRecordedHandNumber int
@@ -130,9 +132,15 @@ func (r *Room) Sit(userID, name string, seat int, buyIn int64) error {
 	return nil
 }
 
-func (r *Room) Start() error {
+func (r *Room) Start(userID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.requireOwnerLocked(userID); err != nil {
+		return err
+	}
+	if r.Game != nil && r.Game.Phase != game.PhaseFinished {
+		return errors.New("game already started")
+	}
 	players := map[int]*game.PlayerState{}
 	r.handStartStacks = map[int]int64{}
 	for s, seat := range r.Seats {
@@ -151,6 +159,8 @@ func (r *Room) Start() error {
 		return err
 	}
 	r.Game = g
+	r.Paused = false
+	r.Ending = false
 	return nil
 }
 
@@ -159,6 +169,9 @@ func (r *Room) Action(userID string, a game.Action) error {
 	defer r.mu.Unlock()
 	if r.Game == nil {
 		return errors.New("game not started")
+	}
+	if r.Paused {
+		return errors.New("game is paused")
 	}
 	if err := r.Engine.ApplyAction(r.Game, userID, a); err != nil {
 		return err
@@ -174,12 +187,76 @@ func (r *Room) SkipCurrentTurn() error {
 	if r.Game == nil {
 		return errors.New("game not started")
 	}
+	if r.Paused {
+		return errors.New("game is paused")
+	}
 	if err := r.Engine.AutoActCurrent(r.Game); err != nil {
 		return err
 	}
 	r.syncStacksLocked()
 	r.maybeAutoStartNextHandLocked()
 	return nil
+}
+
+func (r *Room) Pause(userID string, paused bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.requireOwnerLocked(userID); err != nil {
+		return err
+	}
+	if r.Game == nil {
+		return errors.New("game not started")
+	}
+	r.Paused = paused
+	return nil
+}
+
+func (r *Room) End(userID string, requestedHandNumber int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if err := r.requireOwnerLocked(userID); err != nil {
+		return err
+	}
+	if r.Game == nil {
+		r.Paused = false
+		r.Ending = false
+		r.handStartStacks = nil
+		return nil
+	}
+	if requestedHandNumber > 0 && r.Game.HandNumber > requestedHandNumber && r.lastRecordedHandNumber >= requestedHandNumber {
+		if handHasPlayerAction(r.Game) {
+			r.Ending = true
+			return nil
+		}
+		r.Game = nil
+		r.Paused = false
+		r.Ending = false
+		r.handStartStacks = nil
+		return nil
+	}
+	if r.Game.Phase == game.PhaseFinished {
+		r.recordFinishedHandLocked()
+		r.Game = nil
+		r.Paused = false
+		r.Ending = false
+		r.handStartStacks = nil
+		return nil
+	}
+	r.Ending = true
+	return nil
+}
+
+func handHasPlayerAction(g *game.GameState) bool {
+	if g == nil {
+		return false
+	}
+	for _, entry := range g.Log {
+		switch entry.Type {
+		case "fold", "check", "call", "bet", "raise", "all_in":
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Room) syncStacksLocked() {
@@ -198,6 +275,16 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 	}
 
 	r.recordFinishedHandLocked()
+	if r.Ending {
+		r.Game = nil
+		r.Paused = false
+		r.Ending = false
+		r.handStartStacks = nil
+		return
+	}
+	if r.Paused {
+		return
+	}
 
 	players := map[int]*game.PlayerState{}
 	for s, seat := range r.Seats {
@@ -298,7 +385,7 @@ func (r *Room) recordFinishedHandLocked() {
 func (r *Room) Snapshot(forUser string) map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	resp := map[string]any{"id": r.ID, "ownerId": r.OwnerID, "settings": r.Settings, "seats": r.Seats, "handHistory": r.handHistory, "ledger": r.ledgerLocked()}
+	resp := map[string]any{"id": r.ID, "ownerId": r.OwnerID, "settings": r.Settings, "seats": r.Seats, "paused": r.Paused, "endingAfterHand": r.Ending, "handHistory": r.handHistory, "ledger": r.ledgerLocked()}
 	if r.Game != nil {
 		players := map[int]game.PublicPlayerState{}
 		for s, p := range r.Game.Players {
@@ -308,7 +395,7 @@ func (r *Room) Snapshot(forUser string) map[string]any {
 			}
 			players[s] = pub
 		}
-		resp["game"] = map[string]any{"handNumber": r.Game.HandNumber, "startedAt": r.Game.StartedAt, "phase": r.Game.Phase, "dealerSeat": r.Game.DealerSeat, "currentTurn": r.Game.CurrentTurn, "currentBet": r.Game.CurrentBet, "pot": r.Game.Pot, "community": r.Game.Community, "players": players, "winners": r.Game.Winners, "log": r.Game.Log}
+		resp["game"] = map[string]any{"handNumber": r.Game.HandNumber, "startedAt": r.Game.StartedAt, "phase": r.Game.Phase, "dealerSeat": r.Game.DealerSeat, "smallBlind": r.Game.SmallBlind, "bigBlind": r.Game.BigBlind, "minRaise": r.Game.MinRaise, "currentTurn": r.Game.CurrentTurn, "currentBet": r.Game.CurrentBet, "pot": r.Game.Pot, "community": r.Game.Community, "players": players, "winners": r.Game.Winners, "log": r.Game.Log}
 	}
 
 	if r.lastHandSummaryByUser != nil {
@@ -317,6 +404,13 @@ func (r *Room) Snapshot(forUser string) map[string]any {
 		}
 	}
 	return resp
+}
+
+func (r *Room) requireOwnerLocked(userID string) error {
+	if userID != r.OwnerID {
+		return errors.New("only room owner can do this")
+	}
+	return nil
 }
 
 func (r *Room) ledgerLocked() []LedgerEntry {

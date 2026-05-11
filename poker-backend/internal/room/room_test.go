@@ -39,6 +39,107 @@ func TestNewRoomDefaultsToOneTwoBlinds(t *testing.T) {
 	}
 }
 
+func TestOnlyOwnerCanControlGame(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 1,
+		BigBlind:   2,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("guest", "Guest", 1, 1000); err != nil {
+		t.Fatalf("sit guest: %v", err)
+	}
+	if err := rm.Start("guest"); err == nil {
+		t.Fatal("non-owner started game")
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("owner start: %v", err)
+	}
+	if err := rm.Pause("guest", true); err == nil {
+		t.Fatal("non-owner paused game")
+	}
+	if err := rm.Pause("owner", true); err != nil {
+		t.Fatalf("owner pause: %v", err)
+	}
+	if err := rm.Action("owner", game.Action{Type: game.ActionFold}); err == nil {
+		t.Fatal("action while paused was allowed")
+	}
+	if err := rm.SkipCurrentTurn(); err == nil {
+		t.Fatal("auto action while paused was allowed")
+	}
+	if err := rm.Pause("owner", false); err != nil {
+		t.Fatalf("owner resume: %v", err)
+	}
+	if err := rm.End("guest", rm.Game.HandNumber); err == nil {
+		t.Fatal("non-owner ended game")
+	}
+	if err := rm.End("owner", rm.Game.HandNumber); err != nil {
+		t.Fatalf("owner end: %v", err)
+	}
+	if !rm.Ending {
+		t.Fatal("game was not marked to end after hand")
+	}
+	if rm.Game == nil {
+		t.Fatal("active hand was cancelled immediately")
+	}
+	if err := rm.Action("owner", game.Action{Type: game.ActionFold}); err != nil {
+		t.Fatalf("finish ending hand: %v", err)
+	}
+	if rm.Game != nil {
+		t.Fatal("game still active after ending hand finished")
+	}
+	if rm.Ending {
+		t.Fatal("ending flag still set after hand finished")
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("owner restart after end: %v", err)
+	}
+	if rm.Game == nil {
+		t.Fatal("game did not restart after end")
+	}
+}
+
+func TestEndAfterHandRequestStopsJustAutoStartedNextHand(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 1,
+		BigBlind:   2,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("guest", "Guest", 1, 1000); err != nil {
+		t.Fatalf("sit guest: %v", err)
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("owner start: %v", err)
+	}
+	requestedHand := rm.Game.HandNumber
+	if err := rm.Action("owner", game.Action{Type: game.ActionFold}); err != nil {
+		t.Fatalf("finish hand before end request arrives: %v", err)
+	}
+	if rm.Game == nil || rm.Game.HandNumber <= requestedHand {
+		t.Fatalf("next hand was not auto-started, game=%#v", rm.Game)
+	}
+	if err := rm.End("owner", requestedHand); err != nil {
+		t.Fatalf("owner end stale hand request: %v", err)
+	}
+	if rm.Game != nil {
+		t.Fatal("just auto-started next hand was not stopped")
+	}
+	if rm.Ending {
+		t.Fatal("ending flag still set after stopping auto-started hand")
+	}
+}
+
 func TestFinishedHandRecordsHistoryAndLedger(t *testing.T) {
 	rm := New("user-1", model.RoomSettings{
 		MaxSeats:   2,
@@ -54,7 +155,7 @@ func TestFinishedHandRecordsHistoryAndLedger(t *testing.T) {
 	if err := rm.Sit("user-2", "Bob", 1, 1000); err != nil {
 		t.Fatalf("sit bob: %v", err)
 	}
-	if err := rm.Start(); err != nil {
+	if err := rm.Start("user-1"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	if err := rm.Action("user-1", game.Action{Type: game.ActionFold}); err != nil {
@@ -115,7 +216,7 @@ func TestSnapshotOnlyShowsCardsToMatchingUser(t *testing.T) {
 	if err := rm.Sit("user-2", "Bob", 1, 1000); err != nil {
 		t.Fatalf("sit bob: %v", err)
 	}
-	if err := rm.Start(); err != nil {
+	if err := rm.Start("user-1"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 

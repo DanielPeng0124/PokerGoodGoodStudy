@@ -23,12 +23,13 @@ func NewHub(m *room.Manager) *Hub {
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
 type Message struct {
-	Type   string      `json:"type"`
-	Seat   int         `json:"seat,omitempty"`
-	BuyIn  int64       `json:"buyIn,omitempty"`
-	Name   string      `json:"name,omitempty"`
-	Action game.Action `json:"action,omitempty"`
-	Text   string      `json:"text,omitempty"`
+	Type       string      `json:"type"`
+	Seat       int         `json:"seat,omitempty"`
+	BuyIn      int64       `json:"buyIn,omitempty"`
+	Name       string      `json:"name,omitempty"`
+	HandNumber int         `json:"handNumber,omitempty"`
+	Action     game.Action `json:"action,omitempty"`
+	Text       string      `json:"text,omitempty"`
 }
 
 func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
@@ -65,7 +66,13 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 				name = sitName
 			}
 		case "start_game":
-			err = rm.Start()
+			err = rm.Start(uid)
+		case "pause_game":
+			err = rm.Pause(uid, true)
+		case "resume_game":
+			err = rm.Pause(uid, false)
+		case "end_game":
+			err = rm.End(uid, msg.HandNumber)
 		case "action":
 			err = rm.Action(uid, msg.Action)
 		case "skip_turn":

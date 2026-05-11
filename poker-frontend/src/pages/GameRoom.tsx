@@ -12,8 +12,11 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
   const ws = useRef(new PokerSocket());
   const [sitForm, setSitForm] = useState<{ seat: number; name: string; buyIn: number }>();
   const [sitError, setSitError] = useState('');
+  const [controlError, setControlError] = useState('');
+  const [ownerControlPending, setOwnerControlPending] = useState<'pause' | 'resume' | 'end' | ''>('');
 
   const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => s.userId === userId)?.index, [room, userId]);
+  const isOwner = room?.ownerId === userId;
   const duplicateSitName = useMemo(() => {
     if (!room || !sitForm) return false;
     const nextName = normalizeName(sitForm.name);
@@ -23,8 +26,19 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
 
   useEffect(() => {
     getRoom(roomId, userId, name).then(setRoom).catch(console.error);
-    ws.current.connect(roomId, userId, name, handleMessage, () => setConnected(false));
-    setConnected(true);
+    setConnected(false);
+    ws.current.connect(
+      roomId,
+      userId,
+      name,
+      handleMessage,
+      () => setConnected(true),
+      () => setConnected(false),
+      () => {
+        setConnected(false);
+        setControlError('WebSocket connection failed');
+      },
+    );
     return () => ws.current.close();
   }, [roomId, userId, setRoom, handleMessage, setConnected]);
 
@@ -35,6 +49,17 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
     setSitForm(undefined);
     setSitError('');
   }, [mySeat, room, setUser]);
+
+  useEffect(() => {
+    if (!room || !ownerControlPending) return;
+    if (ownerControlPending === 'pause' && room.paused) setOwnerControlPending('');
+    if (ownerControlPending === 'resume' && !room.paused) setOwnerControlPending('');
+    if (ownerControlPending === 'end' && (room.endingAfterHand || !room.game)) setOwnerControlPending('');
+  }, [room, ownerControlPending]);
+
+  useEffect(() => {
+    if (error) setOwnerControlPending('');
+  }, [error]);
 
   function sit(seat: number) {
     if (!room || mySeat !== undefined) return;
@@ -59,6 +84,20 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
 
   function action(a: ClientAction) { ws.current.action(a); }
 
+  function sendOwnerControl(control: 'pause' | 'resume' | 'end') {
+    try {
+      setControlError('');
+      setOwnerControlPending(control);
+      if (control === 'pause') ws.current.pauseGame();
+      if (control === 'resume') ws.current.resumeGame();
+      if (control === 'end') ws.current.endGame(room?.game?.handNumber);
+    } catch (err) {
+      console.error(err);
+      setOwnerControlPending('');
+      setControlError(err instanceof Error ? err.message : 'Action failed');
+    }
+  }
+
   if (!room) return <main className="loading">加载房间中...</main>;
 
   return (
@@ -66,18 +105,64 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
       <header className="topbar">
         <div>
           <h2>Room {room.id.slice(0, 8)}</h2>
-          <small>{connected ? '已连接' : '未连接'} · {name}</small>
+          <small>
+            {connected ? '已连接' : '未连接'} · {name || 'No name'}
+            {ownerControlPending === 'pause' && ' · Pausing...'}
+            {ownerControlPending === 'resume' && ' · Resuming...'}
+            {ownerControlPending === 'end' && ' · Ending request...'}
+            {room.paused && ' · Paused'}
+            {room.endingAfterHand && ' · Ending after hand'}
+          </small>
         </div>
         <div className="top-actions">
+          {isOwner && room.game && (
+            <>
+              {room.paused && <span className="top-status paused">Paused</span>}
+              {room.endingAfterHand && <span className="top-status ending">Ending after hand</span>}
+              {ownerControlPending && <span className="top-status pending">Sending...</span>}
+              <button
+                className={room.paused ? 'owner-control active' : 'owner-control'}
+                disabled={!!ownerControlPending}
+                onClick={() => sendOwnerControl(room.paused ? 'resume' : 'pause')}
+              >
+                {room.paused ? 'Resume' : 'Pause'}
+              </button>
+              <button
+                className="owner-control danger"
+                disabled={!!ownerControlPending || room.endingAfterHand}
+                onClick={() => sendOwnerControl('end')}
+              >
+                {room.endingAfterHand ? 'Ending...' : 'End After Hand'}
+              </button>
+            </>
+          )}
           <button onClick={() => navigator.clipboard.writeText(room.id)}>复制房间 ID</button>
           <button onClick={onLeave}>离开</button>
         </div>
       </header>
-      {error && <div className="error" onClick={clearError}>{error}</div>}
+      {(error || controlError) && (
+        <div
+          className="error"
+          onClick={() => {
+            clearError();
+            setControlError('');
+          }}
+        >
+          {error || controlError}
+        </div>
+      )}
       <div className="layout">
         <div>
           <PokerTable room={room} myUserId={userId} onSit={sit} />
-          <ActionPanel game={room.game} mySeat={mySeat} onStart={() => ws.current.startGame()} onAction={action} onSkipTurn={() => ws.current.skipTurn()} />
+          <ActionPanel
+            game={room.game}
+            paused={room.paused}
+            isOwner={isOwner}
+            mySeat={mySeat}
+            onStart={() => ws.current.startGame()}
+            onAction={action}
+            onSkipTurn={() => ws.current.skipTurn()}
+          />
         </div>
         <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
       </div>

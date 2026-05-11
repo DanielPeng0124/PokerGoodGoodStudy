@@ -54,6 +54,9 @@ export type Game = {
   startedAt: string;
   phase: Phase;
   dealerSeat: number;
+  smallBlind: number;
+  bigBlind: number;
+  minRaise: number;
   currentTurn: number;
   currentBet: number;
   pot: number;
@@ -106,6 +109,8 @@ export type RoomState = {
   ownerId: string;
   settings: RoomSettings;
   seats: Record<string, Seat>;
+  paused: boolean;
+  endingAfterHand: boolean;
   game?: Game;
   handHistory: HandRecord[];
   ledger: LedgerEntry[];
