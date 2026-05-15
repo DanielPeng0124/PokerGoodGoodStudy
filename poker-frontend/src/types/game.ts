@@ -64,6 +64,7 @@ export type Game = {
   players: Record<string, Player>;
   winners?: number[];
   log?: HandLogEntry[];
+  turnDeadline?: string; // ISO timestamp; present only when TurnTimeoutSecs > 0
 };
 
 export type HandPlayerRecord = {

@@ -201,6 +201,96 @@ func TestFinishedHandRecordsHistoryAndLedger(t *testing.T) {
 	}
 }
 
+func TestDealerRotatesEachHand(t *testing.T) {
+	rm := New("u0", model.RoomSettings{
+		MaxSeats:   3,
+		SmallBlind: 1,
+		BigBlind:   2,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+	if err := rm.Sit("u0", "P0", 0, 500); err != nil {
+		t.Fatalf("sit 0: %v", err)
+	}
+	if err := rm.Sit("u1", "P1", 1, 500); err != nil {
+		t.Fatalf("sit 1: %v", err)
+	}
+	if err := rm.Sit("u2", "P2", 2, 500); err != nil {
+		t.Fatalf("sit 2: %v", err)
+	}
+	if err := rm.Start("u0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	seen := map[int]bool{}
+	for i := 0; i < 6; i++ {
+		dealer := rm.Game.DealerSeat
+		hand := rm.Game.HandNumber
+		seen[dealer] = true
+		// fold until hand ends; whoever's turn it is folds
+		for rm.Game != nil && rm.Game.HandNumber == hand {
+			actor := rm.Game.CurrentTurn
+			actorID := rm.Game.Players[actor].UserID
+			if err := rm.Action(actorID, game.Action{Type: game.ActionFold}); err != nil {
+				t.Fatalf("hand %d fold: %v", hand, err)
+			}
+		}
+		if rm.Game == nil {
+			t.Fatalf("game ended unexpectedly after hand %d", hand)
+		}
+	}
+
+	// After 6 hands with 3 players all 3 seats must have been dealer at least once.
+	for seat := 0; seat < 3; seat++ {
+		if !seen[seat] {
+			t.Errorf("seat %d was never dealer in 6 hands; dealer sequence may be stuck", seat)
+		}
+	}
+}
+
+func TestDealerRotatesAfterSkipTurn(t *testing.T) {
+	rm := New("u0", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 1,
+		BigBlind:   2,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+	if err := rm.Sit("u0", "P0", 0, 500); err != nil {
+		t.Fatalf("sit 0: %v", err)
+	}
+	if err := rm.Sit("u1", "P1", 1, 500); err != nil {
+		t.Fatalf("sit 1: %v", err)
+	}
+	if err := rm.Start("u0"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	dealers := []int{rm.Game.DealerSeat}
+
+	// Simulate "10 seconds up, auto-fold SB" four times via SkipCurrentTurn.
+	for i := 0; i < 4; i++ {
+		hand := rm.Game.HandNumber
+		// Keep skipping until this hand ends.
+		for rm.Game != nil && rm.Game.HandNumber == hand {
+			if err := rm.SkipCurrentTurn(); err != nil {
+				t.Fatalf("SkipCurrentTurn hand %d: %v", hand, err)
+			}
+		}
+		if rm.Game == nil {
+			t.Fatalf("game ended unexpectedly after hand %d", hand)
+		}
+		dealers = append(dealers, rm.Game.DealerSeat)
+	}
+
+	// Dealers must alternate: 0,1,0,1,0
+	for i := 1; i < len(dealers); i++ {
+		if dealers[i] == dealers[i-1] {
+			t.Errorf("dealer did not change between hand %d and %d: both seat %d (sequence: %v)", i, i+1, dealers[i], dealers)
+		}
+	}
+}
+
 func TestSnapshotOnlyShowsCardsToMatchingUser(t *testing.T) {
 	rm := New("user-1", model.RoomSettings{
 		MaxSeats:   2,

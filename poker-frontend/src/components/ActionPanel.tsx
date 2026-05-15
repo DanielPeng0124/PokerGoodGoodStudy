@@ -1,5 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ClientAction, Game } from '../types/game';
+
+function TurnCountdown({ deadline }: { deadline: string }) {
+  const [secsLeft, setSecsLeft] = useState(() => Math.max(0, Math.ceil((new Date(deadline).getTime() - Date.now()) / 1000)));
+  const rafRef = useRef<number>(0);
+
+  useEffect(() => {
+    function tick() {
+      const left = Math.max(0, Math.ceil((new Date(deadline).getTime() - Date.now()) / 1000));
+      setSecsLeft(left);
+      if (left > 0) rafRef.current = requestAnimationFrame(tick);
+    }
+    rafRef.current = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [deadline]);
+
+  return <span className={`turn-countdown${secsLeft <= 5 ? ' urgent' : ''}`}>{secsLeft}s</span>;
+}
 
 export function ActionPanel({ game, paused, isOwner, mySeat, onAction, onStart, onSkipTurn }: {
   game?: Game;
@@ -49,7 +66,13 @@ export function ActionPanel({ game, paused, isOwner, mySeat, onAction, onStart, 
         isOwner ? <button className="primary big" onClick={onStart}>Start Next Hand</button> : <div className="waiting">Waiting for owner to start next hand</div>
       ) : (
         <>
-          {paused ? <div className="waiting">Game paused</div> : isMyTurn ? <div className="your-turn">Your turn</div> : <div className="waiting">Waiting for Seat {waitingSeat}</div>}
+          {paused ? (
+            <div className="waiting">Game paused</div>
+          ) : isMyTurn ? (
+            <div className="your-turn">Your turn {game.turnDeadline && <TurnCountdown deadline={game.turnDeadline} />}</div>
+          ) : (
+            <div className="waiting">Waiting for Seat {waitingSeat} {game.turnDeadline && <TurnCountdown deadline={game.turnDeadline} />}</div>
+          )}
           <div className="action-buttons">
             <button disabled={actionDisabled} onClick={() => onAction({ type: 'fold' })}>Fold</button>
             <button disabled={actionDisabled || toCall > 0} onClick={() => onAction({ type: 'check' })}>Check</button>

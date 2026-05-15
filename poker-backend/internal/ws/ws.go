@@ -44,6 +44,10 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 	}
 	h.conns[roomID][conn] = uid
 	defer delete(h.conns[roomID], conn)
+	// Register the auto-act broadcast callback once per room (idempotent: safe to set again).
+	if rm, err := h.Manager.Get(roomID); err == nil {
+		rm.SetAutoActCallback(func() { h.broadcastState(roomID, rm) })
+	}
 	h.sendState(roomID, conn, uid)
 	for {
 		var msg Message
