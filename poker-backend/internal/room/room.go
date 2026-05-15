@@ -12,10 +12,6 @@ import (
 	"poker-backend/internal/model"
 )
 
-// autoActBroadcaster is called (outside the room mutex) after a timer-triggered auto-act,
-// so the Hub can push the new state to all connected clients.
-type autoActBroadcaster func()
-
 type Seat struct {
 	Index  int    `json:"index"`
 	UserID string `json:"userId,omitempty"`
@@ -103,9 +99,6 @@ type Room struct {
 	// the delta when the hand ends.
 	handStartStacks map[int]int64
 
-	turnTimer    *time.Timer
-	turnDeadline time.Time
-	onAutoAct    autoActBroadcaster
 	// Computed when a hand ends, keyed by userId.
 	lastHandSummaryByUser map[string]HandSummary
 	handHistory           []HandRecord
@@ -141,6 +134,7 @@ func New(ownerID string, settings model.RoomSettings) *Room {
 		Seats:                map[int]*Seat{},
 		Engine:               game.NewEngine(),
 		nextHandNumber:       1,
+		lastDealerSeat:       -1,
 		handHistory:          []HandRecord{},
 		totalBuyInsByUser:    map[string]int64{},
 		offTableStacksByUser: map[string]int64{},
@@ -259,54 +253,6 @@ func (r *Room) Start(userID string) error {
 	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
 	return nil
-}
-
-// SetAutoActCallback registers a function the room calls (outside its mutex) after a
-// timer-triggered auto-act, so the caller can broadcast the new state to clients.
-func (r *Room) SetAutoActCallback(fn autoActBroadcaster) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.onAutoAct = fn
-}
-
-// resetTurnTimerLocked stops any running turn timer and starts a new one if the
-// room settings specify a TurnTimeoutSecs > 0 and a hand is in progress.
-// Must be called with r.mu held.
-func (r *Room) resetTurnTimerLocked() {
-	if r.turnTimer != nil {
-		r.turnTimer.Stop()
-		r.turnTimer = nil
-	}
-	r.turnDeadline = time.Time{}
-	secs := r.Settings.TurnTimeoutSecs
-	if secs <= 0 || r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused {
-		return
-	}
-	d := time.Duration(secs) * time.Second
-	r.turnDeadline = time.Now().Add(d)
-	r.turnTimer = time.AfterFunc(d, r.timerAutoAct)
-}
-
-// timerAutoAct is the turn-timer callback. It runs in its own goroutine.
-func (r *Room) timerAutoAct() {
-	r.mu.Lock()
-	if r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused {
-		r.mu.Unlock()
-		return
-	}
-	if err := r.Engine.AutoActCurrent(r.Game); err != nil {
-		r.mu.Unlock()
-		return
-	}
-	r.syncStacksLocked()
-	r.maybeAutoStartNextHandLocked()
-	r.resetTurnTimerLocked()
-	cb := r.onAutoAct
-	r.mu.Unlock()
-
-	if cb != nil {
-		cb()
-	}
 }
 
 func (r *Room) Action(userID string, a game.Action) error {
