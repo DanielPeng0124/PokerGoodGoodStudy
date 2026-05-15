@@ -23,6 +23,7 @@ export type Seat = {
   name?: string;
   stack: number;
   buyIn: number;
+  away?: boolean;
 };
 
 export type Player = {
@@ -102,6 +103,17 @@ export type LedgerEntry = {
   lastHandDelta: number;
   handsPlayed: number;
   handsWon: number;
+  seated: boolean;
+};
+
+export type TurnTimer = {
+  seatIndex: number;
+  userId: string;
+  expiresAt: string;
+  remainingSeconds: number;
+  extensionsUsed: number;
+  extensionMax: number;
+  durationSeconds: number;
 };
 
 export type RoomState = {
@@ -112,6 +124,7 @@ export type RoomState = {
   paused: boolean;
   endingAfterHand: boolean;
   game?: Game;
+  turnTimer?: TurnTimer;
   handHistory: HandRecord[];
   ledger: LedgerEntry[];
   lastHandSummary?: {

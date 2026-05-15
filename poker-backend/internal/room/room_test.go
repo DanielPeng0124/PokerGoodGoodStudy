@@ -3,6 +3,7 @@ package room
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"poker-backend/internal/game"
 	"poker-backend/internal/model"
@@ -235,5 +236,410 @@ func TestSnapshotOnlyShowsCardsToMatchingUser(t *testing.T) {
 	otherPlayers := otherGame["players"].(map[int]game.PublicPlayerState)
 	if got := len(otherPlayers[0].Cards); got != 0 {
 		t.Fatalf("different user sees %d alice cards, want 0", got)
+	}
+}
+
+func TestBustedSeatIsVacatedAndBuyInsAccumulate(t *testing.T) {
+	rm := New("alice", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("alice", "Alice", 0, 100); err != nil {
+		t.Fatalf("sit alice: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 100); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+
+	rm.handStartStacks = map[int]int64{0: 100, 1: 100}
+	rm.Game = &game.GameState{
+		HandNumber: 1,
+		StartedAt:  time.Now(),
+		Phase:      game.PhaseFinished,
+		DealerSeat: 0,
+		SmallBlind: 5,
+		BigBlind:   10,
+		Players:    map[int]*game.PlayerState{0: {UserID: "alice", Name: "Alice", SeatIndex: 0, Stack: 0, Status: game.StatusFolded}, 1: {UserID: "bob", Name: "Bob", SeatIndex: 1, Stack: 200, Status: game.StatusActive}},
+		Winners:    []int{1},
+		Community:  []game.Card{},
+		Log:        []game.LogEntry{},
+	}
+	rm.syncStacksLocked()
+	rm.recordFinishedHandLocked()
+
+	if _, ok := rm.Seats[0]; ok {
+		t.Fatal("busted alice seat was not vacated")
+	}
+	if _, ok := rm.Seats[1]; !ok {
+		t.Fatal("bob seat was unexpectedly vacated")
+	}
+	if err := rm.Sit("alice", "Alice", 0, 150); err != nil {
+		t.Fatalf("alice re-sit after bust: %v", err)
+	}
+
+	rows := map[string]LedgerEntry{}
+	for _, row := range rm.ledgerLocked() {
+		rows[row.UserID] = row
+	}
+	if rows["alice"].BuyIn != 250 {
+		t.Fatalf("alice buy-in = %d, want 250", rows["alice"].BuyIn)
+	}
+	if rows["alice"].CurrentStack != 150 {
+		t.Fatalf("alice current stack = %d, want 150", rows["alice"].CurrentStack)
+	}
+	if rows["alice"].Net != -100 {
+		t.Fatalf("alice net = %d, want -100", rows["alice"].Net)
+	}
+}
+
+func TestLedgerKeepsLatestStackAfterRebuyAndSeatRelease(t *testing.T) {
+	rm := New("alice", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("alice", "Alice", 0, 700); err != nil {
+		t.Fatalf("sit alice: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 700); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	rm.handStartStacks = map[int]int64{0: 700, 1: 700}
+	rm.Game = &game.GameState{
+		HandNumber: 1,
+		StartedAt:  time.Now(),
+		Phase:      game.PhaseFinished,
+		DealerSeat: 0,
+		SmallBlind: 5,
+		BigBlind:   10,
+		Players:    map[int]*game.PlayerState{0: {UserID: "alice", Name: "Alice", SeatIndex: 0, Stack: 0, Status: game.StatusAllIn}, 1: {UserID: "bob", Name: "Bob", SeatIndex: 1, Stack: 1400, Status: game.StatusActive}},
+		Winners:    []int{1},
+	}
+	rm.syncStacksLocked()
+	rm.recordFinishedHandLocked()
+
+	if err := rm.Sit("alice", "Alice", 0, 700); err != nil {
+		t.Fatalf("alice re-sit: %v", err)
+	}
+	if err := rm.SetAway("alice", true); err != nil {
+		t.Fatalf("alice release seat: %v", err)
+	}
+
+	rows := map[string]LedgerEntry{}
+	for _, row := range rm.ledgerLocked() {
+		rows[row.UserID] = row
+	}
+	if rows["alice"].BuyIn != 1400 {
+		t.Fatalf("alice buy-in = %d, want 1400", rows["alice"].BuyIn)
+	}
+	if rows["alice"].CurrentStack != 700 {
+		t.Fatalf("alice current stack = %d, want 700", rows["alice"].CurrentStack)
+	}
+	if rows["alice"].Net != -700 {
+		t.Fatalf("alice net = %d, want -700", rows["alice"].Net)
+	}
+	if rows["alice"].BuyIn+rows["alice"].Net != rows["alice"].CurrentStack {
+		t.Fatalf("ledger invariant failed: buy-in %d + net %d != stack %d", rows["alice"].BuyIn, rows["alice"].Net, rows["alice"].CurrentStack)
+	}
+}
+
+func TestBustedSeatIsVacatedAfterRealActionFlow(t *testing.T) {
+	rm := New("alice", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("alice", "Alice", 0, 100); err != nil {
+		t.Fatalf("sit alice: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 100); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	if err := rm.Start("alice"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	rm.Game.Players[0].Cards = []game.Card{{Rank: 4, Suit: game.Spades}, {Rank: 4, Suit: game.Hearts}}
+	rm.Game.Players[1].Cards = []game.Card{{Rank: 14, Suit: game.Spades}, {Rank: 14, Suit: game.Hearts}}
+	rm.Game.Deck = []game.Card{
+		{Rank: 2, Suit: game.Spades},
+		{Rank: 2, Suit: game.Clubs}, {Rank: 7, Suit: game.Diamonds}, {Rank: 9, Suit: game.Hearts},
+		{Rank: 3, Suit: game.Spades},
+		{Rank: 11, Suit: game.Spades},
+		{Rank: 5, Suit: game.Spades},
+		{Rank: 3, Suit: game.Clubs},
+	}
+
+	if err := rm.Action("alice", game.Action{Type: game.ActionAllIn}); err != nil {
+		t.Fatalf("alice all-in: %v", err)
+	}
+	if err := rm.Action("bob", game.Action{Type: game.ActionCall}); err != nil {
+		t.Fatalf("bob call: %v", err)
+	}
+
+	if _, ok := rm.Seats[0]; ok {
+		t.Fatal("busted alice seat was not vacated after real action flow")
+	}
+	if err := rm.Sit("alice", "Alice", 0, 150); err != nil {
+		t.Fatalf("alice re-sit after real bust: %v", err)
+	}
+}
+
+func TestSnapshotVacatesAlreadyRecordedBustedSeat(t *testing.T) {
+	rm := New("alice", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("alice", "Alice", 0, 100); err != nil {
+		t.Fatalf("sit alice: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 100); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	rm.Game = &game.GameState{
+		HandNumber: 1,
+		StartedAt:  time.Now(),
+		Phase:      game.PhaseFinished,
+		DealerSeat: 0,
+		Players:    map[int]*game.PlayerState{0: {UserID: "alice", Name: "Alice", SeatIndex: 0, Stack: 0, Status: game.StatusAllIn}, 1: {UserID: "bob", Name: "Bob", SeatIndex: 1, Stack: 200, Status: game.StatusActive}},
+		Winners:    []int{1},
+	}
+	rm.lastRecordedHandNumber = 1
+	rm.Seats[0].Stack = 0
+	rm.Seats[1].Stack = 200
+
+	rm.Snapshot("alice")
+
+	if _, ok := rm.Seats[0]; ok {
+		t.Fatal("snapshot did not vacate already-recorded busted seat")
+	}
+	if err := rm.Sit("alice", "Alice", 0, 150); err != nil {
+		t.Fatalf("alice re-sit after snapshot cleanup: %v", err)
+	}
+}
+
+func TestSitCleansStaleBustedSeatBeforeValidation(t *testing.T) {
+	rm := New("alice", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("alice", "Alice", 0, 100); err != nil {
+		t.Fatalf("sit alice: %v", err)
+	}
+	rm.Seats[0].Stack = 0
+
+	if err := rm.Sit("alice", "Alice", 0, 150); err != nil {
+		t.Fatalf("alice re-sit after stale bust: %v", err)
+	}
+	if rm.Seats[0].Stack != 150 {
+		t.Fatalf("alice stack = %d, want 150", rm.Seats[0].Stack)
+	}
+}
+
+func TestAwaySeatIsReleasedWhenOutOfHand(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   4,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 1000); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	if err := rm.Sit("carol", "Carol", 2, 1000); err != nil {
+		t.Fatalf("sit carol: %v", err)
+	}
+	if err := rm.SetAway("bob", true); err != nil {
+		t.Fatalf("set bob away: %v", err)
+	}
+	if _, ok := rm.Seats[1]; ok {
+		t.Fatal("bob seat was not vacated")
+	}
+	if err := rm.Sit("dave", "Dave", 1, 500); err != nil {
+		t.Fatalf("dave sit in released seat: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 3, 500); err != nil {
+		t.Fatalf("bob sit again elsewhere: %v", err)
+	}
+
+	rows := map[string]LedgerEntry{}
+	for _, row := range rm.ledgerLocked() {
+		rows[row.UserID] = row
+	}
+	if rows["bob"].BuyIn != 1500 {
+		t.Fatalf("bob buy-in = %d, want 1500", rows["bob"].BuyIn)
+	}
+	if rows["bob"].CurrentStack != 1500 {
+		t.Fatalf("bob current stack = %d, want 1500", rows["bob"].CurrentStack)
+	}
+	if rows["bob"].Net != 0 {
+		t.Fatalf("bob net = %d, want 0", rows["bob"].Net)
+	}
+}
+
+func TestAwayDuringActiveHandReleasesSeatAfterHand(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 1000); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if err := rm.SetAway("bob", true); err != nil {
+		t.Fatalf("set bob away during hand: %v", err)
+	}
+	if rm.Seats[1] == nil || !rm.Seats[1].Away {
+		t.Fatal("bob was not marked away during active hand")
+	}
+	if err := rm.End("owner", 0); err != nil {
+		t.Fatalf("end after current hand: %v", err)
+	}
+	if err := rm.Action("owner", game.Action{Type: game.ActionFold}); err != nil {
+		t.Fatalf("finish hand: %v", err)
+	}
+	if rm.Game != nil {
+		t.Fatal("game was not ended after the hand")
+	}
+	if _, ok := rm.Seats[1]; ok {
+		t.Fatal("away seat was not released after hand")
+	}
+
+	rows := map[string]LedgerEntry{}
+	var netSum int64
+	for _, row := range rm.ledgerLocked() {
+		rows[row.UserID] = row
+		netSum += row.Net
+	}
+	if netSum != 0 {
+		t.Fatalf("ledger net sum = %d, want 0; rows = %#v", netSum, rows)
+	}
+	if rows["owner"].Net != -5 {
+		t.Fatalf("owner net = %d, want -5", rows["owner"].Net)
+	}
+	if rows["bob"].Net != 5 {
+		t.Fatalf("bob net = %d, want 5", rows["bob"].Net)
+	}
+	if rows["bob"].CurrentStack != 1005 {
+		t.Fatalf("bob current stack = %d, want 1005", rows["bob"].CurrentStack)
+	}
+	if rows["bob"].Seated {
+		t.Fatal("bob ledger row still shows seated after away release")
+	}
+
+	if err := rm.Sit("guest", "Guest", 1, 500); err != nil {
+		t.Fatalf("guest sit in released seat: %v", err)
+	}
+}
+
+func TestTurnTimerAutoCheckOrFold(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 1000); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	rm.Ending = true
+	rm.turnDeadline = time.Now().Add(-time.Second)
+
+	if !rm.AutoActExpired(time.Now()) {
+		t.Fatal("expired timer did not auto-act")
+	}
+	if rm.Game != nil {
+		t.Fatal("game did not end after timed-out fold")
+	}
+	rows := map[string]LedgerEntry{}
+	var netSum int64
+	for _, row := range rm.ledgerLocked() {
+		rows[row.UserID] = row
+		netSum += row.Net
+	}
+	if rows["owner"].Net != -5 {
+		t.Fatalf("owner net = %d, want -5", rows["owner"].Net)
+	}
+	if rows["bob"].Net != 5 {
+		t.Fatalf("bob net = %d, want 5", rows["bob"].Net)
+	}
+	if netSum != 0 {
+		t.Fatalf("ledger net sum = %d, want 0", netSum)
+	}
+}
+
+func TestAddTurnTimeIsLimitedToThreeUsesPerHand(t *testing.T) {
+	rm := New("owner", model.RoomSettings{
+		MaxSeats:   2,
+		SmallBlind: 5,
+		BigBlind:   10,
+		MinBuyIn:   100,
+		MaxBuyIn:   2000,
+	})
+	if err := rm.Sit("owner", "Owner", 0, 1000); err != nil {
+		t.Fatalf("sit owner: %v", err)
+	}
+	if err := rm.Sit("bob", "Bob", 1, 1000); err != nil {
+		t.Fatalf("sit bob: %v", err)
+	}
+	if err := rm.Start("owner"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	before := rm.turnDeadline
+	for i := 0; i < maxTurnExtensions; i++ {
+		if err := rm.AddTurnTime("owner"); err != nil {
+			t.Fatalf("add time %d: %v", i+1, err)
+		}
+	}
+	if !rm.turnDeadline.After(before) {
+		t.Fatal("turn deadline did not extend")
+	}
+	if err := rm.AddTurnTime("owner"); err == nil {
+		t.Fatal("fourth add time succeeded")
+	}
+	timer := rm.turnTimerLocked(time.Now())
+	if timer == nil {
+		t.Fatal("turn timer missing")
+	}
+	if timer.ExtensionsUsed != maxTurnExtensions {
+		t.Fatalf("extensions used = %d, want %d", timer.ExtensionsUsed, maxTurnExtensions)
 	}
 }

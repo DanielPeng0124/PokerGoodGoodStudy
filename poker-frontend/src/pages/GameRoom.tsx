@@ -5,7 +5,7 @@ import { usePokerStore } from '../store/usePokerStore';
 import { PokerTable } from '../components/PokerTable';
 import { ActionPanel } from '../components/ActionPanel';
 import { ChatPanel } from '../components/ChatPanel';
-import type { ClientAction } from '../types/game';
+import type { ClientAction, RoomState, Seat } from '../types/game';
 
 export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => void }) {
   const { userId, name, room, setUser, setRoom, chats, handleMessage, connected, setConnected, error, clearError } = usePokerStore();
@@ -15,13 +15,15 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
   const [controlError, setControlError] = useState('');
   const [ownerControlPending, setOwnerControlPending] = useState<'pause' | 'resume' | 'end' | ''>('');
 
-  const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => s.userId === userId)?.index, [room, userId]);
+  const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => isLiveSeat(room, s) && s.userId === userId)?.index, [room, userId]);
+  const mySeatInfo = mySeat === undefined ? undefined : room?.seats[String(mySeat)];
+  const mySeatInActiveHand = mySeat !== undefined && !!room?.game?.players?.[String(mySeat)] && room.game.phase !== 'finished';
   const isOwner = room?.ownerId === userId;
   const duplicateSitName = useMemo(() => {
     if (!room || !sitForm) return false;
     const nextName = normalizeName(sitForm.name);
     if (!nextName) return false;
-    return Object.values(room.seats).some((seat) => normalizeName(seat.name ?? '') === nextName);
+    return Object.values(room.seats).some((seat) => isLiveSeat(room, seat) && normalizeName(seat.name ?? '') === nextName);
   }, [room, sitForm]);
 
   useEffect(() => {
@@ -84,6 +86,22 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
 
   function action(a: ClientAction) { ws.current.action(a); }
 
+  function setAway(away: boolean) {
+    try {
+      ws.current.setAway(away);
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Action failed');
+    }
+  }
+
+  function leaveSeat() {
+    try {
+      ws.current.leaveSeat();
+    } catch (err) {
+      setControlError(err instanceof Error ? err.message : 'Action failed');
+    }
+  }
+
   function sendOwnerControl(control: 'pause' | 'resume' | 'end') {
     try {
       setControlError('');
@@ -115,6 +133,24 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
           </small>
         </div>
         <div className="top-actions">
+          {mySeatInfo && (
+            <>
+              {mySeatInfo.away && <span className="top-status away">Away</span>}
+              <button
+                className={mySeatInfo.away ? 'owner-control active' : 'owner-control'}
+                onClick={() => setAway(!mySeatInfo.away)}
+              >
+                {mySeatInfo.away ? 'Back' : 'Away'}
+              </button>
+              <button
+                className="owner-control danger"
+                disabled={mySeatInActiveHand}
+                onClick={leaveSeat}
+              >
+                Quit Seat
+              </button>
+            </>
+          )}
           {isOwner && room.game && (
             <>
               {room.paused && <span className="top-status paused">Paused</span>}
@@ -136,8 +172,6 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
               </button>
             </>
           )}
-          <button onClick={() => navigator.clipboard.writeText(room.id)}>复制房间 ID</button>
-          <button onClick={onLeave}>离开</button>
         </div>
       </header>
       {(error || controlError) && (
@@ -159,9 +193,11 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
             paused={room.paused}
             isOwner={isOwner}
             mySeat={mySeat}
+            turnTimer={room.turnTimer}
             onStart={() => ws.current.startGame()}
             onAction={action}
             onSkipTurn={() => ws.current.skipTurn()}
+            onAddTime={() => ws.current.addTime()}
           />
         </div>
         <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
@@ -209,4 +245,9 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
 
 function normalizeName(value: string) {
   return value.trim().toLowerCase();
+}
+
+function isLiveSeat(room: RoomState | undefined, seat: Seat) {
+  const activeHandPlayer = room?.game?.phase !== 'finished' && !!room?.game?.players?.[String(seat.index)];
+  return seat.stack > 0 || activeHandPlayer;
 }
