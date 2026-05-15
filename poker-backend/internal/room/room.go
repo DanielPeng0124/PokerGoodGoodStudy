@@ -12,6 +12,10 @@ import (
 	"poker-backend/internal/model"
 )
 
+// autoActBroadcaster is called (outside the room mutex) after a timer-triggered auto-act,
+// so the Hub can push the new state to all connected clients.
+type autoActBroadcaster func()
+
 type Seat struct {
 	Index  int    `json:"index"`
 	UserID string `json:"userId,omitempty"`
@@ -94,9 +98,14 @@ type Room struct {
 
 	nextHandNumber         int
 	lastRecordedHandNumber int
+	lastDealerSeat         int // -1 means no previous hand
 	// Captured at the start of a hand (before posting blinds), used to calculate
 	// the delta when the hand ends.
 	handStartStacks map[int]int64
+
+	turnTimer    *time.Timer
+	turnDeadline time.Time
+	onAutoAct    autoActBroadcaster
 	// Computed when a hand ends, keyed by userId.
 	lastHandSummaryByUser map[string]HandSummary
 	handHistory           []HandRecord
@@ -232,7 +241,7 @@ func (r *Room) Start(userID string) error {
 		players[s] = &game.PlayerState{UserID: seat.UserID, Name: seat.Name, SeatIndex: s, Stack: seat.Stack, Status: game.StatusActive}
 		r.handStartStacks[s] = seat.Stack
 	}
-	dealer, sb, bb, err := pickButton(players)
+	dealer, sb, bb, err := pickButton(players, r.lastDealerSeat)
 	if err != nil {
 		return err
 	}
@@ -243,12 +252,61 @@ func (r *Room) Start(userID string) error {
 		r.nextHandNumber--
 		return err
 	}
+	r.lastDealerSeat = dealer
 	r.Game = g
 	r.Paused = false
 	r.Ending = false
 	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
 	return nil
+}
+
+// SetAutoActCallback registers a function the room calls (outside its mutex) after a
+// timer-triggered auto-act, so the caller can broadcast the new state to clients.
+func (r *Room) SetAutoActCallback(fn autoActBroadcaster) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onAutoAct = fn
+}
+
+// resetTurnTimerLocked stops any running turn timer and starts a new one if the
+// room settings specify a TurnTimeoutSecs > 0 and a hand is in progress.
+// Must be called with r.mu held.
+func (r *Room) resetTurnTimerLocked() {
+	if r.turnTimer != nil {
+		r.turnTimer.Stop()
+		r.turnTimer = nil
+	}
+	r.turnDeadline = time.Time{}
+	secs := r.Settings.TurnTimeoutSecs
+	if secs <= 0 || r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused {
+		return
+	}
+	d := time.Duration(secs) * time.Second
+	r.turnDeadline = time.Now().Add(d)
+	r.turnTimer = time.AfterFunc(d, r.timerAutoAct)
+}
+
+// timerAutoAct is the turn-timer callback. It runs in its own goroutine.
+func (r *Room) timerAutoAct() {
+	r.mu.Lock()
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused {
+		r.mu.Unlock()
+		return
+	}
+	if err := r.Engine.AutoActCurrent(r.Game); err != nil {
+		r.mu.Unlock()
+		return
+	}
+	r.syncStacksLocked()
+	r.maybeAutoStartNextHandLocked()
+	r.resetTurnTimerLocked()
+	cb := r.onAutoAct
+	r.mu.Unlock()
+
+	if cb != nil {
+		cb()
+	}
 }
 
 func (r *Room) Action(userID string, a game.Action) error {
@@ -460,7 +518,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		}
 	}
 
-	dealer, sb, bb, err := pickButton(players)
+	dealer, sb, bb, err := pickButton(players, r.lastDealerSeat)
 	if err != nil {
 		return
 	}
@@ -471,6 +529,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		r.nextHandNumber--
 		return
 	}
+	r.lastDealerSeat = dealer
 	r.Game = g
 	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
@@ -553,7 +612,11 @@ func (r *Room) Snapshot(forUser string) map[string]any {
 			}
 			players[s] = pub
 		}
-		resp["game"] = map[string]any{"handNumber": r.Game.HandNumber, "startedAt": r.Game.StartedAt, "phase": r.Game.Phase, "dealerSeat": r.Game.DealerSeat, "smallBlind": r.Game.SmallBlind, "bigBlind": r.Game.BigBlind, "minRaise": r.Game.MinRaise, "currentTurn": r.Game.CurrentTurn, "currentBet": r.Game.CurrentBet, "pot": r.Game.Pot, "community": r.Game.Community, "players": players, "winners": r.Game.Winners, "log": r.Game.Log}
+		gameMap := map[string]any{"handNumber": r.Game.HandNumber, "startedAt": r.Game.StartedAt, "phase": r.Game.Phase, "dealerSeat": r.Game.DealerSeat, "smallBlind": r.Game.SmallBlind, "bigBlind": r.Game.BigBlind, "minRaise": r.Game.MinRaise, "currentTurn": r.Game.CurrentTurn, "currentBet": r.Game.CurrentBet, "pot": r.Game.Pot, "community": r.Game.Community, "players": players, "winners": r.Game.Winners, "log": r.Game.Log}
+		if !r.turnDeadline.IsZero() {
+			gameMap["turnDeadline"] = r.turnDeadline
+		}
+		resp["game"] = gameMap
 	}
 
 	if timer := r.turnTimerLocked(time.Now()); timer != nil {
@@ -878,14 +941,29 @@ func containsInt(values []int, needle int) bool {
 	return false
 }
 
-func pickButton(players map[int]*game.PlayerState) (dealer, sb, bb int, err error) {
+func pickButton(players map[int]*game.PlayerState, lastDealer int) (dealer, sb, bb int, err error) {
 	seats := game.ActiveSeatIndexes(players)
 	if len(seats) < 2 {
 		return 0, 0, 0, errors.New("need at least two players")
 	}
-	if len(seats) == 2 {
-		return seats[0], seats[0], seats[1], nil
+
+	// Find the next dealer seat clockwise after lastDealer.
+	// lastDealer == -1 means first hand: start at seats[0].
+	dealerIdx := 0
+	if lastDealer >= 0 {
+		for i, s := range seats {
+			if s > lastDealer {
+				dealerIdx = i
+				break
+			}
+		}
+		// If all active seats are <= lastDealer, wrap around to seats[0].
 	}
-	// 3+ players: dealer is seats[0], then SB/BB go clockwise (simplified MVP rule).
-	return seats[0], seats[1], seats[2], nil
+
+	n := len(seats)
+	dealer = seats[dealerIdx]
+	if n == 2 {
+		return dealer, dealer, seats[(dealerIdx+1)%n], nil
+	}
+	return dealer, seats[(dealerIdx+1)%n], seats[(dealerIdx+2)%n], nil
 }

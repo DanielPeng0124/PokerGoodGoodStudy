@@ -111,6 +111,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .your-turn button small { margin-left: 4px; font-size: 11px; opacity: .72; }
 .your-turn { color: #04140d; background: linear-gradient(135deg, #ffdb70, #38f29b); }
 .waiting { color: #d8e9e2; background: rgba(255,255,255,.08); }
+.turn-countdown { margin-left: 8px; font-variant-numeric: tabular-nums; }
+.turn-countdown.urgent { color: #ff5252; }
 .action-buttons { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
 .action-buttons button, .raise-row button, .ghost { padding: 13px; color: #fff; border-radius: 16px; background: rgba(255,255,255,.12); font-weight: 800; }
 .action-buttons button:first-child { background: rgba(239,68,68,.75); }
