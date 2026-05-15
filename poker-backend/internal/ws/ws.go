@@ -150,7 +150,9 @@ func (h *Hub) ensureRoomTimer(roomID string) {
 			if err != nil {
 				return
 			}
-			if rm.AutoActExpired(now) {
+			acted := rm.AutoActExpired(now)
+			started := rm.StartDelayedHandIfReady(now)
+			if acted || started {
 				h.broadcastState(roomID, rm)
 			}
 		}

@@ -2,7 +2,7 @@ import { API_BASE, authQuery } from './config';
 import type { RoomSettings, RoomState } from '../types/game';
 
 const defaultSettings: RoomSettings = {
-  maxSeats: 9,
+  maxSeats: 10,
   smallBlind: 1,
   bigBlind: 2,
   minBuyIn: 200,

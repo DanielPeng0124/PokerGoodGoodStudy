@@ -127,6 +127,8 @@ func TestEndAfterHandRequestStopsJustAutoStartedNextHand(t *testing.T) {
 	if err := rm.Action("owner", game.Action{Type: game.ActionFold}); err != nil {
 		t.Fatalf("finish hand before end request arrives: %v", err)
 	}
+	// Simulate the 2-second display delay elapsing.
+	rm.StartDelayedHandIfReady(time.Now().Add(5 * time.Second))
 	if rm.Game == nil || rm.Game.HandNumber <= requestedHand {
 		t.Fatalf("next hand was not auto-started, game=%#v", rm.Game)
 	}
@@ -223,19 +225,22 @@ func TestDealerRotatesEachHand(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 
+	future := time.Now().Add(10 * time.Second)
 	seen := map[int]bool{}
 	for i := 0; i < 6; i++ {
 		dealer := rm.Game.DealerSeat
 		hand := rm.Game.HandNumber
 		seen[dealer] = true
 		// fold until hand ends; whoever's turn it is folds
-		for rm.Game != nil && rm.Game.HandNumber == hand {
+		for rm.Game != nil && rm.Game.HandNumber == hand && rm.Game.Phase != "finished" {
 			actor := rm.Game.CurrentTurn
 			actorID := rm.Game.Players[actor].UserID
 			if err := rm.Action(actorID, game.Action{Type: game.ActionFold}); err != nil {
 				t.Fatalf("hand %d fold: %v", hand, err)
 			}
 		}
+		// Skip the 2-second display delay.
+		rm.StartDelayedHandIfReady(future)
 		if rm.Game == nil {
 			t.Fatalf("game ended unexpectedly after hand %d", hand)
 		}
@@ -267,17 +272,20 @@ func TestDealerRotatesAfterSkipTurn(t *testing.T) {
 		t.Fatalf("start: %v", err)
 	}
 
+	future := time.Now().Add(10 * time.Second)
 	dealers := []int{rm.Game.DealerSeat}
 
 	// Simulate "10 seconds up, auto-fold SB" four times via SkipCurrentTurn.
 	for i := 0; i < 4; i++ {
 		hand := rm.Game.HandNumber
 		// Keep skipping until this hand ends.
-		for rm.Game != nil && rm.Game.HandNumber == hand {
+		for rm.Game != nil && rm.Game.HandNumber == hand && rm.Game.Phase != "finished" {
 			if err := rm.SkipCurrentTurn(); err != nil {
 				t.Fatalf("SkipCurrentTurn hand %d: %v", hand, err)
 			}
 		}
+		// Skip the 2-second display delay.
+		rm.StartDelayedHandIfReady(future)
 		if rm.Game == nil {
 			t.Fatalf("game ended unexpectedly after hand %d", hand)
 		}

@@ -109,11 +109,12 @@ type Room struct {
 	lastSeatByUser        map[string]int
 	turnDeadline          time.Time
 	turnExtensionUses     map[string]int
+	nextHandAt            time.Time // zero means no pending auto-start
 }
 
 func New(ownerID string, settings model.RoomSettings) *Room {
 	if settings.MaxSeats == 0 {
-		settings.MaxSeats = 9
+		settings.MaxSeats = 10
 	}
 	if settings.SmallBlind == 0 {
 		settings.SmallBlind = 1
@@ -421,25 +422,41 @@ func (r *Room) syncStacksLocked() {
 }
 
 func (r *Room) maybeAutoStartNextHandLocked() {
-	// Auto-start next hand when the current hand is finished and there are
-	// more than 2 players with stack > 0 (as requested).
 	if r.Game == nil || r.Game.Phase != game.PhaseFinished {
 		return
 	}
-
 	r.recordFinishedHandLocked()
 	if r.Ending {
 		r.Game = nil
 		r.Paused = false
 		r.Ending = false
 		r.handStartStacks = nil
+		r.nextHandAt = time.Time{}
 		r.clearTurnTimerLocked()
 		return
 	}
 	if r.Paused {
+		r.nextHandAt = time.Time{}
 		return
 	}
+	// Schedule next hand to start after a short display delay.
+	if r.nextHandAt.IsZero() {
+		r.nextHandAt = time.Now().Add(2 * time.Second)
+	}
+}
 
+// StartDelayedHandIfReady is called by the Hub's ticker; it starts the next hand
+// once the post-hand display delay has elapsed. Returns true if a new hand started.
+func (r *Room) StartDelayedHandIfReady(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.nextHandAt.IsZero() || now.Before(r.nextHandAt) {
+		return false
+	}
+	r.nextHandAt = time.Time{}
+	if r.Game == nil || r.Game.Phase != game.PhaseFinished || r.Ending || r.Paused {
+		return false
+	}
 	players := map[int]*game.PlayerState{}
 	for s, seat := range r.Seats {
 		if seat != nil && !seat.Away && seat.Stack > 0 {
@@ -453,32 +470,30 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		}
 	}
 	if len(players) < 2 {
-		return
+		return false
 	}
-
-	// Capture start-of-hand stacks for the next hand (before posting blinds).
 	r.handStartStacks = map[int]int64{}
 	for seatIndex, p := range players {
 		if p != nil {
 			r.handStartStacks[seatIndex] = p.Stack
 		}
 	}
-
 	dealer, sb, bb, err := pickButton(players, r.lastDealerSeat)
 	if err != nil {
-		return
+		return false
 	}
 	handNumber := r.nextHandNumber
 	r.nextHandNumber++
 	g, err := r.Engine.StartHand(players, dealer, sb, bb, r.Settings.SmallBlind, r.Settings.BigBlind, handNumber)
 	if err != nil {
 		r.nextHandNumber--
-		return
+		return false
 	}
 	r.lastDealerSeat = dealer
 	r.Game = g
 	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
+	return true
 }
 
 func (r *Room) recordFinishedHandLocked() {
@@ -561,6 +576,25 @@ func (r *Room) Snapshot(forUser string) map[string]any {
 		gameMap := map[string]any{"handNumber": r.Game.HandNumber, "startedAt": r.Game.StartedAt, "phase": r.Game.Phase, "dealerSeat": r.Game.DealerSeat, "smallBlind": r.Game.SmallBlind, "bigBlind": r.Game.BigBlind, "minRaise": r.Game.MinRaise, "currentTurn": r.Game.CurrentTurn, "currentBet": r.Game.CurrentBet, "pot": r.Game.Pot, "community": r.Game.Community, "players": players, "winners": r.Game.Winners, "log": r.Game.Log}
 		if !r.turnDeadline.IsZero() {
 			gameMap["turnDeadline"] = r.turnDeadline
+		}
+		if r.Game.Phase == game.PhaseFinished {
+			winnerSet := map[int]bool{}
+			for _, w := range r.Game.Winners {
+				winnerSet[w] = true
+			}
+			winAmounts := map[int]int64{}
+			for _, entry := range r.Game.Log {
+				if entry.SeatIndex == nil {
+					continue
+				}
+				seat := *entry.SeatIndex
+				if entry.Type == "win" || (entry.Type == "return" && winnerSet[seat]) {
+					winAmounts[seat] += entry.Amount
+				}
+			}
+			if len(winAmounts) > 0 {
+				gameMap["winAmounts"] = winAmounts
+			}
 		}
 		resp["game"] = gameMap
 	}

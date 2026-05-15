@@ -3,7 +3,7 @@ import { PlayerSeat } from './PlayerSeat';
 import type { RoomState, Seat } from '../types/game';
 
 const MY_VISUAL_SEAT = 0;
-const VISUAL_SEAT_COUNT = 9;
+const VISUAL_SEAT_COUNT = 10;
 
 export function PokerTable({ room, myUserId, onSit }: {
   room: RoomState;
@@ -34,7 +34,8 @@ export function PokerTable({ room, myUserId, onSit }: {
           const seat = rawSeat && isLiveSeat(room, rawSeat) ? rawSeat : undefined;
           const player = activeGame?.players?.[String(i)];
           const seatPlayer = player && (!seat || player.userId === seat.userId) ? player : undefined;
-          return <PlayerSeat key={i} index={i} visualIndex={visualSeatIndex(i, mySeat, maxSeats)} seat={seat} player={seatPlayer} isMine={seat?.userId === myUserId} isTurn={currentSeat === i} isDealer={activeGame?.dealerSeat === i} isWinner={!!seatPlayer && !!activeGame?.winners?.includes(i)} sitDisabled={mySeat !== undefined} onSit={() => onSit(i)} />;
+          const winAmount = room.game?.phase === 'finished' ? (room.game.winAmounts?.[String(i)] ?? 0) : 0;
+          return <PlayerSeat key={i} index={i} visualIndex={visualSeatIndex(i, mySeat, maxSeats)} seat={seat} player={seatPlayer} isMine={seat?.userId === myUserId} isTurn={currentSeat === i} isDealer={activeGame?.dealerSeat === i} isWinner={!!seatPlayer && !!activeGame?.winners?.includes(i)} winAmount={winAmount} sitDisabled={mySeat !== undefined} onSit={() => onSit(i)} />;
         })}
       </div>
       <div className="table-footer">You: {mySeat === undefined ? 'not seated' : `Seat ${mySeat + 1}`} · SB/BB {room.settings.smallBlind}/{room.settings.bigBlind}</div>

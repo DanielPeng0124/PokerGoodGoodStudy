@@ -14,6 +14,7 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
   const [sitError, setSitError] = useState('');
   const [controlError, setControlError] = useState('');
   const [ownerControlPending, setOwnerControlPending] = useState<'pause' | 'resume' | 'end' | ''>('');
+  const [panelOpen, setPanelOpen] = useState(false);
 
   const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => isLiveSeat(room, s) && s.userId === userId)?.index, [room, userId]);
   const mySeatInfo = mySeat === undefined ? undefined : room?.seats[String(mySeat)];
@@ -34,12 +35,9 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
       userId,
       name,
       handleMessage,
-      () => setConnected(true),
+      () => { setConnected(true); setControlError(''); },
       () => setConnected(false),
-      () => {
-        setConnected(false);
-        setControlError('WebSocket connection failed');
-      },
+      () => setControlError('Connection lost, reconnecting…'),
     );
     return () => ws.current.close();
   }, [roomId, userId, setRoom, handleMessage, setConnected]);
@@ -188,20 +186,30 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
       <div className="layout">
         <div>
           <PokerTable room={room} myUserId={userId} onSit={sit} />
-          <ActionPanel
-            game={room.game}
-            paused={room.paused}
-            isOwner={isOwner}
-            mySeat={mySeat}
-            turnTimer={room.turnTimer}
-            onStart={() => ws.current.startGame()}
-            onAction={action}
-            onSkipTurn={() => ws.current.skipTurn()}
-            onAddTime={() => ws.current.addTime()}
-          />
+          <div className="bottom-bar">
+            <button className="bottom-bar-chat" onClick={() => setPanelOpen(p => !p)} aria-label="Open panel">≡</button>
+            <ActionPanel
+              game={room.game}
+              paused={room.paused}
+              isOwner={isOwner}
+              mySeat={mySeat}
+              turnTimer={room.turnTimer}
+              onStart={() => ws.current.startGame()}
+              onAction={action}
+              onSkipTurn={() => ws.current.skipTurn()}
+              onAddTime={() => ws.current.addTime()}
+            />
+          </div>
         </div>
-        <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
+        <div className={`panel-drawer${panelOpen ? ' panel-open' : ''}`}>
+          <div className="panel-drawer-header">
+            <span>Chat / Log / Ledger</span>
+            <button className="panel-drawer-close" onClick={() => setPanelOpen(false)}>✕</button>
+          </div>
+          <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
+        </div>
       </div>
+      {panelOpen && <div className="panel-backdrop" onClick={() => setPanelOpen(false)} />}
       {sitForm && (
         <div className="sit-modal-backdrop" onClick={() => setSitForm(undefined)}>
           <form className="sit-modal" onSubmit={submitSit} onClick={(e) => e.stopPropagation()}>

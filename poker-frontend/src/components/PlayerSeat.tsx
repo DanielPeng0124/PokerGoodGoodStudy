@@ -1,7 +1,7 @@
 import { CardView } from './CardView';
 import type { Player, Seat } from '../types/game';
 
-export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer, isWinner, isMine, sitDisabled, onSit }: {
+export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer, isWinner, winAmount, isMine, sitDisabled, onSit }: {
   index: number;
   visualIndex?: number;
   seat?: Seat;
@@ -9,6 +9,7 @@ export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer,
   isTurn?: boolean;
   isDealer?: boolean;
   isWinner?: boolean;
+  winAmount?: number;
   isMine?: boolean;
   sitDisabled?: boolean;
   onSit: () => void;
@@ -36,6 +37,7 @@ export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer,
             <div className="stack">{player?.stack ?? seat.stack}</div>
           </div>
           {!!player?.bet && <div className="bet-chip">{player.bet}</div>}
+          {!!winAmount && <div className="win-amount">+{winAmount}</div>}
         </>
       ) : (
         <button className="sit-button" disabled={sitDisabled} onClick={onSit}>Seat {index + 1}<span>{sitDisabled ? 'Seated' : 'Sit'}</span></button>
