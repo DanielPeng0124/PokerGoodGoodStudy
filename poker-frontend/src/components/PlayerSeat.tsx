@@ -14,8 +14,9 @@ export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer,
   onSit: () => void;
 }) {
   const occupied = !!seat;
+  const statusLabel = seat?.away ? 'away' : (player?.status ?? 'waiting');
   return (
-    <div className={`seat seat-${visualIndex ?? index} ${occupied ? 'occupied' : 'empty'} ${isTurn ? 'turn' : ''} ${isWinner ? 'winner' : ''} ${isMine ? 'mine' : ''}`}>
+    <div className={`seat seat-${visualIndex ?? index} ${occupied ? 'occupied' : 'empty'} ${seat?.away ? 'away' : ''} ${isTurn ? 'turn' : ''} ${isWinner ? 'winner' : ''} ${isMine ? 'mine' : ''}`}>
       {occupied ? (
         <>
           {player && (
@@ -30,7 +31,7 @@ export function PlayerSeat({ index, visualIndex, seat, player, isTurn, isDealer,
             <div className="seat-meta">
               <span>Seat {index + 1}</span>
               {isDealer && <b>D</b>}
-              <span>{player?.status ?? 'waiting'}</span>
+              <span>{statusLabel}</span>
             </div>
             <div className="stack">{player?.stack ?? seat.stack}</div>
           </div>

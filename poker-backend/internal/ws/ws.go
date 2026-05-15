@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"poker-backend/internal/auth"
@@ -13,11 +15,18 @@ import (
 
 type Hub struct {
 	Manager *room.Manager
-	conns   map[string]map[*websocket.Conn]string
+	mu      sync.Mutex
+	conns   map[string]map[*websocket.Conn]*clientConn
+	timers  map[string]bool
+}
+
+type clientConn struct {
+	uid string
+	mu  sync.Mutex
 }
 
 func NewHub(m *room.Manager) *Hub {
-	return &Hub{Manager: m, conns: map[string]map[*websocket.Conn]string{}}
+	return &Hub{Manager: m, conns: map[string]map[*websocket.Conn]*clientConn{}, timers: map[string]bool{}}
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
@@ -27,6 +36,7 @@ type Message struct {
 	Seat       int         `json:"seat,omitempty"`
 	BuyIn      int64       `json:"buyIn,omitempty"`
 	Name       string      `json:"name,omitempty"`
+	Away       bool        `json:"away,omitempty"`
 	HandNumber int         `json:"handNumber,omitempty"`
 	Action     game.Action `json:"action,omitempty"`
 	Text       string      `json:"text,omitempty"`
@@ -39,16 +49,20 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.Close()
+	h.ensureRoomTimer(roomID)
+	client := &clientConn{uid: uid}
+	h.mu.Lock()
 	if h.conns[roomID] == nil {
-		h.conns[roomID] = map[*websocket.Conn]string{}
+		h.conns[roomID] = map[*websocket.Conn]*clientConn{}
 	}
-	h.conns[roomID][conn] = uid
-	defer delete(h.conns[roomID], conn)
-	// Register the auto-act broadcast callback once per room (idempotent: safe to set again).
-	if rm, err := h.Manager.Get(roomID); err == nil {
-		rm.SetAutoActCallback(func() { h.broadcastState(roomID, rm) })
-	}
-	h.sendState(roomID, conn, uid)
+	h.conns[roomID][conn] = client
+	h.mu.Unlock()
+	defer func() {
+		h.mu.Lock()
+		delete(h.conns[roomID], conn)
+		h.mu.Unlock()
+	}()
+	h.sendState(roomID, conn, client)
 	for {
 		var msg Message
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -56,7 +70,7 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 		}
 		rm, err := h.Manager.Get(roomID)
 		if err != nil {
-			writeErr(conn, err)
+			writeErr(conn, client, err)
 			continue
 		}
 		switch msg.Type {
@@ -69,6 +83,10 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 			if err == nil {
 				name = sitName
 			}
+		case "set_away":
+			err = rm.SetAway(uid, msg.Away)
+		case "leave_seat":
+			err = rm.LeaveSeat(uid)
 		case "start_game":
 			err = rm.Start(uid)
 		case "pause_game":
@@ -81,6 +99,8 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 			err = rm.Action(uid, msg.Action)
 		case "skip_turn":
 			err = rm.SkipCurrentTurn()
+		case "add_time":
+			err = rm.AddTurnTime(uid)
 		case "chat":
 			h.broadcast(roomID, map[string]any{"type": "chat", "userId": uid, "name": name, "text": msg.Text})
 			continue
@@ -88,7 +108,7 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 			err = nil
 		}
 		if err != nil {
-			writeErr(conn, err)
+			writeErr(conn, client, err)
 			continue
 		}
 		h.broadcastState(roomID, rm)
@@ -96,21 +116,68 @@ func (h *Hub) Serve(roomID string, w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) broadcastState(roomID string, rm *room.Room) {
-	for c, uid := range h.conns[roomID] {
-		_ = c.WriteJSON(map[string]any{"type": "room_state", "payload": rm.Snapshot(uid)})
+	for _, recipient := range h.recipients(roomID) {
+		writeJSON(recipient.conn, recipient.client, map[string]any{"type": "room_state", "payload": rm.Snapshot(recipient.client.uid)})
 	}
 }
-func (h *Hub) sendState(roomID string, c *websocket.Conn, uid string) {
+func (h *Hub) sendState(roomID string, c *websocket.Conn, client *clientConn) {
 	if rm, err := h.Manager.Get(roomID); err == nil {
-		_ = c.WriteJSON(map[string]any{"type": "room_state", "payload": rm.Snapshot(uid)})
+		writeJSON(c, client, map[string]any{"type": "room_state", "payload": rm.Snapshot(client.uid)})
 	}
 }
 func (h *Hub) broadcast(roomID string, v any) {
 	b, _ := json.Marshal(v)
-	for c := range h.conns[roomID] {
-		_ = c.WriteMessage(websocket.TextMessage, b)
+	for _, recipient := range h.recipients(roomID) {
+		recipient.client.mu.Lock()
+		_ = recipient.conn.WriteMessage(websocket.TextMessage, b)
+		recipient.client.mu.Unlock()
 	}
 }
-func writeErr(c *websocket.Conn, err error) {
-	_ = c.WriteJSON(map[string]any{"type": "error", "error": err.Error()})
+func (h *Hub) ensureRoomTimer(roomID string) {
+	h.mu.Lock()
+	if h.timers[roomID] {
+		h.mu.Unlock()
+		return
+	}
+	h.timers[roomID] = true
+	h.mu.Unlock()
+
+	go func() {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for now := range ticker.C {
+			rm, err := h.Manager.Get(roomID)
+			if err != nil {
+				return
+			}
+			if rm.AutoActExpired(now) {
+				h.broadcastState(roomID, rm)
+			}
+		}
+	}()
+}
+
+type recipient struct {
+	conn   *websocket.Conn
+	client *clientConn
+}
+
+func (h *Hub) recipients(roomID string) []recipient {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]recipient, 0, len(h.conns[roomID]))
+	for conn, client := range h.conns[roomID] {
+		out = append(out, recipient{conn: conn, client: client})
+	}
+	return out
+}
+
+func writeJSON(c *websocket.Conn, client *clientConn, v any) {
+	client.mu.Lock()
+	_ = c.WriteJSON(v)
+	client.mu.Unlock()
+}
+
+func writeErr(c *websocket.Conn, client *clientConn, err error) {
+	writeJSON(c, client, map[string]any{"type": "error", "error": err.Error()})
 }

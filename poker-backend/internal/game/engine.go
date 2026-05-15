@@ -215,7 +215,7 @@ func nextPhase(g *GameState) error {
 		g.Phase = PhaseFinished
 		return nil
 	}
-	if onlyAllInOrFolded(g) {
+	if noMoreBetting(g) {
 		return nextPhase(g)
 	}
 	g.CurrentTurn = nextToAct(g, g.DealerSeat)
@@ -223,41 +223,166 @@ func nextPhase(g *GameState) error {
 }
 
 func showdown(g *GameState) {
-	best := int64(-1)
-	winners := []int{}
-	for seat, p := range g.Players {
-		if p.Status == StatusActive || p.Status == StatusAllIn {
-			score := EvaluateBest(append(append([]Card{}, p.Cards...), g.Community...))
-			if score > best {
-				best = score
-				winners = []int{seat}
-			} else if score == best {
-				winners = append(winners, seat)
+	levels := contributionLevels(g.Players)
+	handScores := showdownScores(g)
+	winningSeats := []int{}
+	previousLevel := int64(0)
+	for _, level := range levels {
+		amount, contributors := contributionLayer(g.Players, previousLevel, level)
+		previousLevel = level
+		if amount <= 0 || len(contributors) == 0 {
+			continue
+		}
+		if len(contributors) == 1 {
+			seat := contributors[0]
+			g.Players[seat].Stack += amount
+			addSeatLog(g, "return", seat, amount, fmt.Sprintf("%s gets %d returned", displayName(g, seat), amount))
+			continue
+		}
+		eligible := eligibleShowdownSeats(g.Players, level)
+		winners := bestShowdownSeats(handScores, eligible)
+		if len(winners) == 0 {
+			continue
+		}
+		distributeShowdownPot(g, amount, winners)
+		for _, winner := range winners {
+			if !containsSeat(winningSeats, winner) {
+				winningSeats = append(winningSeats, winner)
 			}
 		}
 	}
-	if len(winners) == 0 {
-		return
-	}
-	share := g.Pot / int64(len(winners))
-	for _, s := range winners {
-		g.Players[s].Stack += share
-		addSeatLog(g, "win", s, share, fmt.Sprintf("%s wins %d", displayName(g, s), share))
-	}
-	g.Winners = winners
+	sort.Ints(winningSeats)
+	g.Winners = winningSeats
 	g.Pot = 0
+}
+
+func contributionLevels(players map[int]*PlayerState) []int64 {
+	seen := map[int64]bool{}
+	levels := []int64{}
+	for _, p := range players {
+		if p == nil || p.TotalBet <= 0 || seen[p.TotalBet] {
+			continue
+		}
+		seen[p.TotalBet] = true
+		levels = append(levels, p.TotalBet)
+	}
+	sort.Slice(levels, func(i, j int) bool { return levels[i] < levels[j] })
+	return levels
+}
+
+func contributionLayer(players map[int]*PlayerState, previousLevel, level int64) (int64, []int) {
+	var amount int64
+	contributors := []int{}
+	for seat, p := range players {
+		if p == nil || p.TotalBet <= previousLevel {
+			continue
+		}
+		amount += min(p.TotalBet, level) - previousLevel
+		contributors = append(contributors, seat)
+	}
+	sort.Ints(contributors)
+	return amount, contributors
+}
+
+func showdownScores(g *GameState) map[int]int64 {
+	scores := map[int]int64{}
+	for seat, p := range g.Players {
+		if p == nil || !canWinShowdown(p) {
+			continue
+		}
+		scores[seat] = EvaluateBest(append(append([]Card{}, p.Cards...), g.Community...))
+	}
+	return scores
+}
+
+func eligibleShowdownSeats(players map[int]*PlayerState, level int64) []int {
+	seats := []int{}
+	for seat, p := range players {
+		if p != nil && p.TotalBet >= level && canWinShowdown(p) {
+			seats = append(seats, seat)
+		}
+	}
+	sort.Ints(seats)
+	return seats
+}
+
+func bestShowdownSeats(scores map[int]int64, eligible []int) []int {
+	best := int64(-1)
+	winners := []int{}
+	for _, seat := range eligible {
+		score, ok := scores[seat]
+		if !ok {
+			continue
+		}
+		if score > best {
+			best = score
+			winners = []int{seat}
+		} else if score == best {
+			winners = append(winners, seat)
+		}
+	}
+	return winners
+}
+
+func distributeShowdownPot(g *GameState, amount int64, winners []int) {
+	share := amount / int64(len(winners))
+	remainder := amount % int64(len(winners))
+	for i, seat := range winners {
+		won := share
+		if int64(i) < remainder {
+			won++
+		}
+		if won <= 0 {
+			continue
+		}
+		g.Players[seat].Stack += won
+		addSeatLog(g, "win", seat, won, fmt.Sprintf("%s wins %d", displayName(g, seat), won))
+	}
+}
+
+func canWinShowdown(p *PlayerState) bool {
+	return p.Status == StatusActive || p.Status == StatusAllIn
+}
+
+func containsSeat(seats []int, needle int) bool {
+	for _, seat := range seats {
+		if seat == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func awardSingle(g *GameState) {
 	for _, p := range g.Players {
 		if p.Status == StatusActive || p.Status == StatusAllIn {
-			amount := g.Pot
-			p.Stack += amount
 			g.Winners = []int{p.SeatIndex}
-			addSeatLog(g, "win", p.SeatIndex, amount, fmt.Sprintf("%s wins %d", p.Name, amount))
+			awardSingleByContribution(g, p.SeatIndex)
 			g.Pot = 0
 			return
 		}
+	}
+}
+
+func awardSingleByContribution(g *GameState, winner int) {
+	previousLevel := int64(0)
+	for _, level := range contributionLevels(g.Players) {
+		amount, contributors := contributionLayer(g.Players, previousLevel, level)
+		previousLevel = level
+		if amount <= 0 || len(contributors) == 0 {
+			continue
+		}
+		if len(contributors) == 1 {
+			seat := contributors[0]
+			g.Players[seat].Stack += amount
+			addSeatLog(g, "return", seat, amount, fmt.Sprintf("%s gets %d returned", displayName(g, seat), amount))
+			continue
+		}
+		if !containsSeat(contributors, winner) {
+			continue
+		}
+		g.Players[winner].Stack += amount
+		addSeatLog(g, "win", winner, amount, fmt.Sprintf("%s wins %d", displayName(g, winner), amount))
 	}
 }
 
@@ -404,6 +529,16 @@ func onlyAllInOrFolded(g *GameState) bool {
 		}
 	}
 	return active == 0
+}
+
+func noMoreBetting(g *GameState) bool {
+	active := 0
+	for _, p := range g.Players {
+		if p != nil && p.Status == StatusActive {
+			active++
+		}
+	}
+	return active <= 1 && remaining(g) > 1
 }
 
 func min(a, b int64) int64 {

@@ -22,6 +22,7 @@ type Seat struct {
 	Name   string `json:"name,omitempty"`
 	Stack  int64  `json:"stack"`
 	BuyIn  int64  `json:"buyIn"`
+	Away   bool   `json:"away,omitempty"`
 }
 
 type HandSummary struct {
@@ -66,7 +67,23 @@ type LedgerEntry struct {
 	LastHandDelta int64  `json:"lastHandDelta"`
 	HandsPlayed   int    `json:"handsPlayed"`
 	HandsWon      int    `json:"handsWon"`
+	Seated        bool   `json:"seated"`
 }
+
+type TurnTimer struct {
+	SeatIndex        int       `json:"seatIndex"`
+	UserID           string    `json:"userId"`
+	ExpiresAt        time.Time `json:"expiresAt"`
+	RemainingSeconds int64     `json:"remainingSeconds"`
+	ExtensionsUsed   int       `json:"extensionsUsed"`
+	ExtensionMax     int       `json:"extensionMax"`
+	DurationSeconds  int64     `json:"durationSeconds"`
+}
+
+const (
+	turnDurationSeconds = int64(10)
+	maxTurnExtensions   = 3
+)
 
 type Room struct {
 	mu       sync.Mutex
@@ -92,6 +109,13 @@ type Room struct {
 	// Computed when a hand ends, keyed by userId.
 	lastHandSummaryByUser map[string]HandSummary
 	handHistory           []HandRecord
+	totalBuyInsByUser     map[string]int64
+	offTableStacksByUser  map[string]int64
+	lastStackByUser       map[string]int64
+	lastNameByUser        map[string]string
+	lastSeatByUser        map[string]int
+	turnDeadline          time.Time
+	turnExtensionUses     map[string]int
 }
 
 func New(ownerID string, settings model.RoomSettings) *Room {
@@ -110,12 +134,28 @@ func New(ownerID string, settings model.RoomSettings) *Room {
 	if settings.MaxBuyIn == 0 {
 		settings.MaxBuyIn = 2000
 	}
-	return &Room{ID: uuid.NewString(), OwnerID: ownerID, Settings: settings, Seats: map[int]*Seat{}, Engine: game.NewEngine(), nextHandNumber: 1, lastDealerSeat: -1, handHistory: []HandRecord{}}
+	return &Room{
+		ID:                   uuid.NewString(),
+		OwnerID:              ownerID,
+		Settings:             settings,
+		Seats:                map[int]*Seat{},
+		Engine:               game.NewEngine(),
+		nextHandNumber:       1,
+		handHistory:          []HandRecord{},
+		totalBuyInsByUser:    map[string]int64{},
+		offTableStacksByUser: map[string]int64{},
+		lastStackByUser:      map[string]int64{},
+		lastNameByUser:       map[string]string{},
+		lastSeatByUser:       map[string]int{},
+		turnExtensionUses:    map[string]int{},
+	}
 }
 
 func (r *Room) Sit(userID, name string, seat int, buyIn int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.cleanupFinishedHandLocked()
+	r.removeInactiveBustedSeatsLocked()
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return errors.New("name is required")
@@ -138,6 +178,48 @@ func (r *Room) Sit(userID, name string, seat int, buyIn int64) error {
 		return errors.New("invalid buy-in")
 	}
 	r.Seats[seat] = &Seat{Index: seat, UserID: userID, Name: name, Stack: buyIn, BuyIn: buyIn}
+	r.noteBuyInLocked(userID, name, seat, buyIn)
+	return nil
+}
+
+func (r *Room) SetAway(userID string, away bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seatIndex, seat := r.findSeatByUserLocked(userID)
+	if seat == nil {
+		return errors.New("user is not seated")
+	}
+	if !away {
+		if seat.Stack <= 0 {
+			return errors.New("no chips; quit seat and sit again")
+		}
+		seat.Away = false
+		r.notePlayerLocked(userID, seat.Name, seatIndex, seat.Stack)
+		return nil
+	}
+	if !r.seatInActiveHandLocked(seatIndex) {
+		r.releaseSeatLocked(seatIndex, seat)
+		return nil
+	}
+	if seat.Stack <= 0 {
+		return errors.New("no chips; quit seat and sit again")
+	}
+	seat.Away = true
+	r.notePlayerLocked(userID, seat.Name, seatIndex, seat.Stack)
+	return nil
+}
+
+func (r *Room) LeaveSeat(userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	seatIndex, seat := r.findSeatByUserLocked(userID)
+	if seat == nil {
+		return errors.New("user is not seated")
+	}
+	if r.seatInActiveHandLocked(seatIndex) {
+		return errors.New("cannot quit seat during an active hand")
+	}
+	r.releaseSeatLocked(seatIndex, seat)
 	return nil
 }
 
@@ -153,6 +235,9 @@ func (r *Room) Start(userID string) error {
 	players := map[int]*game.PlayerState{}
 	r.handStartStacks = map[int]int64{}
 	for s, seat := range r.Seats {
+		if seat == nil || seat.Away || seat.Stack <= 0 {
+			continue
+		}
 		players[s] = &game.PlayerState{UserID: seat.UserID, Name: seat.Name, SeatIndex: s, Stack: seat.Stack, Status: game.StatusActive}
 		r.handStartStacks[s] = seat.Stack
 	}
@@ -171,6 +256,7 @@ func (r *Room) Start(userID string) error {
 	r.Game = g
 	r.Paused = false
 	r.Ending = false
+	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
 	return nil
 }
@@ -235,9 +321,7 @@ func (r *Room) Action(userID string, a game.Action) error {
 	if err := r.Engine.ApplyAction(r.Game, userID, a); err != nil {
 		return err
 	}
-	r.syncStacksLocked()
-	r.maybeAutoStartNextHandLocked()
-	r.resetTurnTimerLocked()
+	r.afterActionLocked()
 	return nil
 }
 
@@ -253,9 +337,7 @@ func (r *Room) SkipCurrentTurn() error {
 	if err := r.Engine.AutoActCurrent(r.Game); err != nil {
 		return err
 	}
-	r.syncStacksLocked()
-	r.maybeAutoStartNextHandLocked()
-	r.resetTurnTimerLocked()
+	r.afterActionLocked()
 	return nil
 }
 
@@ -269,6 +351,11 @@ func (r *Room) Pause(userID string, paused bool) error {
 		return errors.New("game not started")
 	}
 	r.Paused = paused
+	if paused {
+		r.clearTurnTimerLocked()
+	} else {
+		r.resetTurnTimerLocked()
+	}
 	return nil
 }
 
@@ -282,6 +369,7 @@ func (r *Room) End(userID string, requestedHandNumber int) error {
 		r.Paused = false
 		r.Ending = false
 		r.handStartStacks = nil
+		r.clearTurnTimerLocked()
 		return nil
 	}
 	if requestedHandNumber > 0 && r.Game.HandNumber > requestedHandNumber && r.lastRecordedHandNumber >= requestedHandNumber {
@@ -293,6 +381,7 @@ func (r *Room) End(userID string, requestedHandNumber int) error {
 		r.Paused = false
 		r.Ending = false
 		r.handStartStacks = nil
+		r.clearTurnTimerLocked()
 		return nil
 	}
 	if r.Game.Phase == game.PhaseFinished {
@@ -301,10 +390,59 @@ func (r *Room) End(userID string, requestedHandNumber int) error {
 		r.Paused = false
 		r.Ending = false
 		r.handStartStacks = nil
+		r.clearTurnTimerLocked()
 		return nil
 	}
 	r.Ending = true
 	return nil
+}
+
+func (r *Room) AddTurnTime(userID string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished {
+		return errors.New("hand is not active")
+	}
+	if r.Paused {
+		return errors.New("game is paused")
+	}
+	p := r.Game.Players[r.Game.CurrentTurn]
+	if p == nil || p.UserID != userID {
+		return errors.New("not your turn")
+	}
+	if r.turnExtensionUses == nil {
+		r.turnExtensionUses = map[string]int{}
+	}
+	if r.turnExtensionUses[userID] >= maxTurnExtensions {
+		return errors.New("no extra time left")
+	}
+	r.turnExtensionUses[userID]++
+	now := time.Now()
+	if r.turnDeadline.Before(now) {
+		r.turnDeadline = now
+	}
+	r.turnDeadline = r.turnDeadline.Add(time.Duration(turnDurationSeconds) * time.Second)
+	return nil
+}
+
+func (r *Room) AutoActExpired(now time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused || r.turnDeadline.IsZero() || now.Before(r.turnDeadline) {
+		return false
+	}
+	if err := r.Engine.AutoActCurrent(r.Game); err != nil {
+		r.resetTurnTimerLocked()
+		return false
+	}
+	r.afterActionLocked()
+	return true
+}
+
+func (r *Room) afterActionLocked() {
+	r.syncStacksLocked()
+	r.maybeAutoStartNextHandLocked()
+	r.resetTurnTimerLocked()
 }
 
 func handHasPlayerAction(g *game.GameState) bool {
@@ -324,7 +462,15 @@ func (r *Room) syncStacksLocked() {
 	for s, p := range r.Game.Players {
 		if seat := r.Seats[s]; seat != nil {
 			seat.Stack = p.Stack
+			r.notePlayerLocked(seat.UserID, seat.Name, s, r.offTableStackLocked(seat.UserID)+seat.Stack)
+		} else if p != nil {
+			r.notePlayerLocked(p.UserID, p.Name, s, r.totalStackForPlayerLocked(p, 0))
 		}
+	}
+	if r.Game.Phase == game.PhaseFinished {
+		r.recordFinishedHandLocked()
+		r.removeBustedSeatsLocked()
+		r.removeAwaySeatsLocked()
 	}
 }
 
@@ -341,6 +487,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		r.Paused = false
 		r.Ending = false
 		r.handStartStacks = nil
+		r.clearTurnTimerLocked()
 		return
 	}
 	if r.Paused {
@@ -349,7 +496,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 
 	players := map[int]*game.PlayerState{}
 	for s, seat := range r.Seats {
-		if seat != nil && seat.Stack > 0 {
+		if seat != nil && !seat.Away && seat.Stack > 0 {
 			players[s] = &game.PlayerState{
 				UserID:    seat.UserID,
 				Name:      seat.Name,
@@ -384,6 +531,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 	}
 	r.lastDealerSeat = dealer
 	r.Game = g
+	r.turnExtensionUses = map[string]int{}
 	r.resetTurnTimerLocked()
 }
 
@@ -392,6 +540,8 @@ func (r *Room) recordFinishedHandLocked() {
 		return
 	}
 	if r.lastRecordedHandNumber == r.Game.HandNumber {
+		r.removeBustedSeatsLocked()
+		r.removeAwaySeatsLocked()
 		return
 	}
 
@@ -426,6 +576,7 @@ func (r *Room) recordFinishedHandLocked() {
 			EndStack:   end,
 			Delta:      delta,
 		}
+		r.notePlayerLocked(p.UserID, p.Name, p.SeatIndex, r.totalStackForPlayerLocked(p, 0))
 	}
 
 	r.handHistory = append(r.handHistory, HandRecord{
@@ -443,11 +594,14 @@ func (r *Room) recordFinishedHandLocked() {
 	})
 	r.lastHandSummaryByUser = summaryByUser
 	r.lastRecordedHandNumber = r.Game.HandNumber
+	r.removeBustedSeatsLocked()
+	r.removeAwaySeatsLocked()
 }
 
 func (r *Room) Snapshot(forUser string) map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.cleanupFinishedHandLocked()
 	resp := map[string]any{"id": r.ID, "ownerId": r.OwnerID, "settings": r.Settings, "seats": r.Seats, "paused": r.Paused, "endingAfterHand": r.Ending, "handHistory": r.handHistory, "ledger": r.ledgerLocked()}
 	if r.Game != nil {
 		players := map[int]game.PublicPlayerState{}
@@ -465,12 +619,64 @@ func (r *Room) Snapshot(forUser string) map[string]any {
 		resp["game"] = gameMap
 	}
 
+	if timer := r.turnTimerLocked(time.Now()); timer != nil {
+		resp["turnTimer"] = timer
+	}
+
 	if r.lastHandSummaryByUser != nil {
 		if s, ok := r.lastHandSummaryByUser[forUser]; ok {
 			resp["lastHandSummary"] = s
 		}
 	}
 	return resp
+}
+
+func (r *Room) cleanupFinishedHandLocked() {
+	if r.Game != nil && r.Game.Phase == game.PhaseFinished {
+		r.recordFinishedHandLocked()
+		r.removeBustedSeatsLocked()
+		r.removeAwaySeatsLocked()
+		r.clearTurnTimerLocked()
+	}
+}
+
+func (r *Room) resetTurnTimerLocked() {
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused {
+		r.clearTurnTimerLocked()
+		return
+	}
+	if r.Game.Players[r.Game.CurrentTurn] == nil {
+		r.clearTurnTimerLocked()
+		return
+	}
+	r.turnDeadline = time.Now().Add(time.Duration(turnDurationSeconds) * time.Second)
+}
+
+func (r *Room) clearTurnTimerLocked() {
+	r.turnDeadline = time.Time{}
+}
+
+func (r *Room) turnTimerLocked(now time.Time) *TurnTimer {
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished || r.Paused || r.turnDeadline.IsZero() {
+		return nil
+	}
+	p := r.Game.Players[r.Game.CurrentTurn]
+	if p == nil {
+		return nil
+	}
+	remaining := int64(0)
+	if now.Before(r.turnDeadline) {
+		remaining = int64((r.turnDeadline.Sub(now) + time.Second - 1) / time.Second)
+	}
+	return &TurnTimer{
+		SeatIndex:        p.SeatIndex,
+		UserID:           p.UserID,
+		ExpiresAt:        r.turnDeadline,
+		RemainingSeconds: remaining,
+		ExtensionsUsed:   r.turnExtensionUses[p.UserID],
+		ExtensionMax:     maxTurnExtensions,
+		DurationSeconds:  turnDurationSeconds,
+	}
 }
 
 func (r *Room) requireOwnerLocked(userID string) error {
@@ -480,19 +686,126 @@ func (r *Room) requireOwnerLocked(userID string) error {
 	return nil
 }
 
-func (r *Room) ledgerLocked() []LedgerEntry {
-	byUser := map[string]*LedgerEntry{}
-	for _, seatIndex := range sortedSeatIndexes(r.Seats) {
-		seat := r.Seats[seatIndex]
-		if seat == nil || seat.UserID == "" {
+func (r *Room) findSeatByUserLocked(userID string) (int, *Seat) {
+	for seatIndex, seat := range r.Seats {
+		if seat != nil && seat.UserID == userID {
+			return seatIndex, seat
+		}
+	}
+	return 0, nil
+}
+
+func (r *Room) noteBuyInLocked(userID, name string, seatIndex int, buyIn int64) {
+	if r.totalBuyInsByUser == nil {
+		r.totalBuyInsByUser = map[string]int64{}
+	}
+	if r.offTableStacksByUser == nil {
+		r.offTableStacksByUser = map[string]int64{}
+	}
+	r.totalBuyInsByUser[userID] += buyIn
+	r.notePlayerLocked(userID, name, seatIndex, r.offTableStacksByUser[userID]+buyIn)
+}
+
+func (r *Room) offTableStackLocked(userID string) int64 {
+	if r.offTableStacksByUser == nil {
+		return 0
+	}
+	return r.offTableStacksByUser[userID]
+}
+
+func (r *Room) totalStackForPlayerLocked(p *game.PlayerState, committed int64) int64 {
+	if p == nil {
+		return 0
+	}
+	offTable := r.offTableStackLocked(p.UserID)
+	if seat := r.Seats[p.SeatIndex]; seat != nil && seat.UserID == p.UserID {
+		return offTable + p.Stack + committed
+	}
+	if offTable > 0 {
+		return offTable
+	}
+	return p.Stack + committed
+}
+
+func (r *Room) notePlayerLocked(userID, name string, seatIndex int, stack int64) {
+	if userID == "" {
+		return
+	}
+	if r.lastStackByUser == nil {
+		r.lastStackByUser = map[string]int64{}
+	}
+	if r.lastNameByUser == nil {
+		r.lastNameByUser = map[string]string{}
+	}
+	if r.lastSeatByUser == nil {
+		r.lastSeatByUser = map[string]int{}
+	}
+	r.lastStackByUser[userID] = stack
+	if strings.TrimSpace(name) != "" {
+		r.lastNameByUser[userID] = name
+	}
+	r.lastSeatByUser[userID] = seatIndex
+}
+
+func (r *Room) removeBustedSeatsLocked() {
+	for seatIndex, seat := range r.Seats {
+		if seat != nil && seat.Stack <= 0 {
+			r.releaseSeatLocked(seatIndex, seat)
+		}
+	}
+}
+
+func (r *Room) removeAwaySeatsLocked() {
+	for seatIndex, seat := range r.Seats {
+		if seat != nil && seat.Away && !r.seatInActiveHandLocked(seatIndex) {
+			r.releaseSeatLocked(seatIndex, seat)
+		}
+	}
+}
+
+func (r *Room) removeInactiveBustedSeatsLocked() {
+	for seatIndex, seat := range r.Seats {
+		if seat == nil || seat.Stack > 0 {
 			continue
 		}
-		byUser[seat.UserID] = &LedgerEntry{
-			UserID:       seat.UserID,
-			Name:         seat.Name,
-			SeatIndex:    seat.Index,
-			BuyIn:        seat.BuyIn,
-			CurrentStack: seat.Stack,
+		if r.seatInActiveHandLocked(seatIndex) {
+			continue
+		}
+		r.releaseSeatLocked(seatIndex, seat)
+	}
+}
+
+func (r *Room) seatInActiveHandLocked(seatIndex int) bool {
+	if r.Game == nil || r.Game.Phase == game.PhaseFinished {
+		return false
+	}
+	_, inHand := r.Game.Players[seatIndex]
+	return inHand
+}
+
+func (r *Room) releaseSeatLocked(seatIndex int, seat *Seat) {
+	if seat == nil {
+		return
+	}
+	if r.offTableStacksByUser == nil {
+		r.offTableStacksByUser = map[string]int64{}
+	}
+	if seat.Stack > 0 {
+		r.offTableStacksByUser[seat.UserID] += seat.Stack
+	}
+	r.notePlayerLocked(seat.UserID, seat.Name, seatIndex, r.offTableStacksByUser[seat.UserID])
+	delete(r.Seats, seatIndex)
+}
+
+func (r *Room) ledgerLocked() []LedgerEntry {
+	byUser := map[string]*LedgerEntry{}
+	for userID, buyIn := range r.totalBuyInsByUser {
+		byUser[userID] = &LedgerEntry{
+			UserID:       userID,
+			Name:         r.lastNameByUser[userID],
+			SeatIndex:    r.lastSeatByUser[userID],
+			BuyIn:        buyIn,
+			CurrentStack: r.lastStackByUser[userID],
 		}
 	}
 
@@ -501,15 +814,17 @@ func (r *Room) ledgerLocked() []LedgerEntry {
 			row := byUser[player.UserID]
 			if row == nil {
 				row = &LedgerEntry{
-					UserID:       player.UserID,
-					Name:         player.Name,
-					SeatIndex:    player.SeatIndex,
-					CurrentStack: player.EndStack,
+					UserID:    player.UserID,
+					Name:      player.Name,
+					SeatIndex: player.SeatIndex,
 				}
 				byUser[player.UserID] = row
 			}
+			if row.Name == "" {
+				row.Name = player.Name
+			}
+			row.SeatIndex = player.SeatIndex
 			row.HandsPlayed++
-			row.Net += player.Delta
 			row.LastHandDelta = player.Delta
 			if containsInt(hand.Winners, player.SeatIndex) {
 				row.HandsWon++
@@ -517,19 +832,40 @@ func (r *Room) ledgerLocked() []LedgerEntry {
 		}
 	}
 
-	if r.Game != nil {
+	for _, seatIndex := range sortedSeatIndexes(r.Seats) {
+		seat := r.Seats[seatIndex]
+		if seat == nil || seat.UserID == "" {
+			continue
+		}
+		row := byUser[seat.UserID]
+		if row == nil {
+			row = &LedgerEntry{UserID: seat.UserID}
+			byUser[seat.UserID] = row
+		}
+		row.Name = seat.Name
+		row.SeatIndex = seat.Index
+		row.BuyIn = r.totalBuyInsByUser[seat.UserID]
+		if row.BuyIn == 0 {
+			row.BuyIn = seat.BuyIn
+		}
+		row.CurrentStack = r.offTableStackLocked(seat.UserID) + seat.Stack
+		row.Seated = true
+	}
+
+	if r.Game != nil && r.Game.Phase != game.PhaseFinished {
 		for _, p := range r.Game.Players {
 			if p == nil {
 				continue
 			}
 			if row := byUser[p.UserID]; row != nil {
-				row.CurrentStack = p.Stack
+				row.CurrentStack = r.totalStackForPlayerLocked(p, p.TotalBet)
 			}
 		}
 	}
 
 	rows := make([]LedgerEntry, 0, len(byUser))
 	for _, row := range byUser {
+		row.Net = row.CurrentStack - row.BuyIn
 		rows = append(rows, *row)
 	}
 	sort.Slice(rows, func(i, j int) bool {

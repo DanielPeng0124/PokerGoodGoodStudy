@@ -27,12 +27,15 @@ export class PokerSocket {
   }
 
   sitDown(seat: number, buyIn: number, name: string) { this.send('sit_down', { seat, buyIn, name }); }
+  setAway(away: boolean) { this.send('set_away', { away }); }
+  leaveSeat() { this.send('leave_seat'); }
   startGame() { this.send('start_game'); }
   pauseGame() { this.send('pause_game'); }
   resumeGame() { this.send('resume_game'); }
   endGame(handNumber?: number) { this.send('end_game', handNumber ? { handNumber } : {}); }
   action(action: ClientAction) { this.send('action', { action }); }
   skipTurn() { this.send('skip_turn'); }
+  addTime() { this.send('add_time'); }
   chat(text: string) { this.send('chat', { text }); }
   close() { this.ws?.close(); this.ws = undefined; }
 }

@@ -111,6 +111,7 @@ function LedgerView({ room }: { room: RoomState }) {
       <div className="ledger-table">
         <div className="ledger-head">
           <span>Player</span>
+          <span>Buy-in</span>
           <span>Stack</span>
           <span>Net</span>
         </div>
@@ -118,8 +119,9 @@ function LedgerView({ room }: { room: RoomState }) {
           <div key={row.userId} className="ledger-row">
             <div>
               <b>{row.name}</b>
-              <small>Seat {row.seatIndex + 1} · {row.handsWon}/{row.handsPlayed} wins</small>
+              <small>{row.seated ? `Seat ${row.seatIndex + 1}` : 'Away'} · {row.handsWon}/{row.handsPlayed} wins</small>
             </div>
+            <span>{row.buyIn}</span>
             <span>{row.currentStack}</span>
             <strong className={netClass(row.net)}>{formatSigned(row.net)}</strong>
           </div>
