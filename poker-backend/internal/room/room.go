@@ -77,6 +77,7 @@ type Room struct {
 
 	nextHandNumber         int
 	lastRecordedHandNumber int
+	lastDealerSeat         int // -1 means no previous hand
 	// Captured at the start of a hand (before posting blinds), used to calculate
 	// the delta when the hand ends.
 	handStartStacks map[int]int64
@@ -101,7 +102,7 @@ func New(ownerID string, settings model.RoomSettings) *Room {
 	if settings.MaxBuyIn == 0 {
 		settings.MaxBuyIn = 2000
 	}
-	return &Room{ID: uuid.NewString(), OwnerID: ownerID, Settings: settings, Seats: map[int]*Seat{}, Engine: game.NewEngine(), nextHandNumber: 1, handHistory: []HandRecord{}}
+	return &Room{ID: uuid.NewString(), OwnerID: ownerID, Settings: settings, Seats: map[int]*Seat{}, Engine: game.NewEngine(), nextHandNumber: 1, lastDealerSeat: -1, handHistory: []HandRecord{}}
 }
 
 func (r *Room) Sit(userID, name string, seat int, buyIn int64) error {
@@ -147,7 +148,7 @@ func (r *Room) Start(userID string) error {
 		players[s] = &game.PlayerState{UserID: seat.UserID, Name: seat.Name, SeatIndex: s, Stack: seat.Stack, Status: game.StatusActive}
 		r.handStartStacks[s] = seat.Stack
 	}
-	dealer, sb, bb, err := pickButton(players)
+	dealer, sb, bb, err := pickButton(players, r.lastDealerSeat)
 	if err != nil {
 		return err
 	}
@@ -158,6 +159,7 @@ func (r *Room) Start(userID string) error {
 		r.nextHandNumber--
 		return err
 	}
+	r.lastDealerSeat = dealer
 	r.Game = g
 	r.Paused = false
 	r.Ending = false
@@ -310,7 +312,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		}
 	}
 
-	dealer, sb, bb, err := pickButton(players)
+	dealer, sb, bb, err := pickButton(players, r.lastDealerSeat)
 	if err != nil {
 		return
 	}
@@ -321,6 +323,7 @@ func (r *Room) maybeAutoStartNextHandLocked() {
 		r.nextHandNumber--
 		return
 	}
+	r.lastDealerSeat = dealer
 	r.Game = g
 }
 
@@ -538,14 +541,29 @@ func containsInt(values []int, needle int) bool {
 	return false
 }
 
-func pickButton(players map[int]*game.PlayerState) (dealer, sb, bb int, err error) {
+func pickButton(players map[int]*game.PlayerState, lastDealer int) (dealer, sb, bb int, err error) {
 	seats := game.ActiveSeatIndexes(players)
 	if len(seats) < 2 {
 		return 0, 0, 0, errors.New("need at least two players")
 	}
-	if len(seats) == 2 {
-		return seats[0], seats[0], seats[1], nil
+
+	// Find the next dealer seat clockwise after lastDealer.
+	// lastDealer == -1 means first hand: start at seats[0].
+	dealerIdx := 0
+	if lastDealer >= 0 {
+		for i, s := range seats {
+			if s > lastDealer {
+				dealerIdx = i
+				break
+			}
+		}
+		// If all active seats are <= lastDealer, wrap around to seats[0].
 	}
-	// 3+ players: dealer is seats[0], then SB/BB go clockwise (simplified MVP rule).
-	return seats[0], seats[1], seats[2], nil
+
+	n := len(seats)
+	dealer = seats[dealerIdx]
+	if n == 2 {
+		return dealer, dealer, seats[(dealerIdx+1)%n], nil
+	}
+	return dealer, seats[(dealerIdx+1)%n], seats[(dealerIdx+2)%n], nil
 }
