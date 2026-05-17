@@ -8,13 +8,13 @@ import { ChatPanel } from '../components/ChatPanel';
 import type { ClientAction, RoomState, Seat } from '../types/game';
 
 export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => void }) {
-  const { userId, name, room, setUser, setRoom, chats, handleMessage, connected, setConnected, error, clearError } = usePokerStore();
+  const { userId, name, room, setUser, setRoom, chats, handleMessage, setConnected, error, clearError } = usePokerStore();
   const ws = useRef(new PokerSocket());
   const [sitForm, setSitForm] = useState<{ seat: number; name: string; buyIn: number }>();
   const [sitError, setSitError] = useState('');
   const [controlError, setControlError] = useState('');
   const [ownerControlPending, setOwnerControlPending] = useState<'pause' | 'resume' | 'end' | ''>('');
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelCollapsed, setPanelCollapsed] = useState(false);
 
   const mySeat = useMemo(() => Object.values(room?.seats ?? {}).find((s) => isLiveSeat(room, s) && s.userId === userId)?.index, [room, userId]);
   const mySeatInfo = mySeat === undefined ? undefined : room?.seats[String(mySeat)];
@@ -118,60 +118,51 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
 
   return (
     <main className="game-page">
-      <header className="topbar">
-        <div>
-          <h2>Room {room.id.slice(0, 8)}</h2>
-          <small>
-            {connected ? '已连接' : '未连接'} · {name || 'No name'}
-            {ownerControlPending === 'pause' && ' · Pausing...'}
-            {ownerControlPending === 'resume' && ' · Resuming...'}
-            {ownerControlPending === 'end' && ' · Ending request...'}
-            {room.paused && ' · Paused'}
-            {room.endingAfterHand && ' · Ending after hand'}
-          </small>
-        </div>
-        <div className="top-actions">
-          {mySeatInfo && (
-            <>
-              {mySeatInfo.away && <span className="top-status away">Away</span>}
-              <button
-                className={mySeatInfo.away ? 'owner-control active' : 'owner-control'}
-                onClick={() => setAway(!mySeatInfo.away)}
-              >
-                {mySeatInfo.away ? 'Back' : 'Away'}
-              </button>
-              <button
-                className="owner-control danger"
-                disabled={mySeatInActiveHand}
-                onClick={leaveSeat}
-              >
-                Quit Seat
-              </button>
-            </>
-          )}
-          {isOwner && room.game && (
-            <>
-              {room.paused && <span className="top-status paused">Paused</span>}
-              {room.endingAfterHand && <span className="top-status ending">Ending after hand</span>}
-              {ownerControlPending && <span className="top-status pending">Sending...</span>}
-              <button
-                className={room.paused ? 'owner-control active' : 'owner-control'}
-                disabled={!!ownerControlPending}
-                onClick={() => sendOwnerControl(room.paused ? 'resume' : 'pause')}
-              >
-                {room.paused ? 'Resume' : 'Pause'}
-              </button>
-              <button
-                className="owner-control danger"
-                disabled={!!ownerControlPending || room.endingAfterHand}
-                onClick={() => sendOwnerControl('end')}
-              >
-                {room.endingAfterHand ? 'Ending...' : 'End After Hand'}
-              </button>
-            </>
-          )}
-        </div>
-      </header>
+      {(mySeatInfo || (isOwner && room.game)) && (
+        <header className="topbar">
+          <div className="top-actions">
+            {mySeatInfo && (
+              <>
+                {mySeatInfo.away && <span className="top-status away">Away</span>}
+                <button
+                  className={mySeatInfo.away ? 'owner-control active' : 'owner-control'}
+                  onClick={() => setAway(!mySeatInfo.away)}
+                >
+                  {mySeatInfo.away ? 'Back' : 'Away'}
+                </button>
+                <button
+                  className="owner-control danger"
+                  disabled={mySeatInActiveHand}
+                  onClick={leaveSeat}
+                >
+                  Quit Seat
+                </button>
+              </>
+            )}
+            {isOwner && room.game && (
+              <>
+                {room.paused && <span className="top-status paused">Paused</span>}
+                {room.endingAfterHand && <span className="top-status ending">Ending after hand</span>}
+                {ownerControlPending && <span className="top-status pending">Sending...</span>}
+                <button
+                  className={room.paused ? 'owner-control active' : 'owner-control'}
+                  disabled={!!ownerControlPending}
+                  onClick={() => sendOwnerControl(room.paused ? 'resume' : 'pause')}
+                >
+                  {room.paused ? 'Resume' : 'Pause'}
+                </button>
+                <button
+                  className="owner-control danger"
+                  disabled={!!ownerControlPending || room.endingAfterHand}
+                  onClick={() => sendOwnerControl('end')}
+                >
+                  {room.endingAfterHand ? 'Ending...' : 'End After Hand'}
+                </button>
+              </>
+            )}
+          </div>
+        </header>
+      )}
       {(error || controlError) && (
         <div
           className="error"
@@ -184,10 +175,12 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
         </div>
       )}
       <div className="layout">
-        <div>
+        <div className="table-column">
           <PokerTable room={room} myUserId={userId} onSit={sit} />
-          <div className="bottom-bar">
-            <button className="bottom-bar-chat" onClick={() => setPanelOpen(p => !p)} aria-label="Open panel">≡</button>
+          {panelCollapsed && (
+            <button className="action-expand" onClick={() => setPanelCollapsed(false)} aria-label="Show actions">▲</button>
+          )}
+          <div className={`bottom-bar${panelCollapsed ? ' hidden' : ''}`}>
             <ActionPanel
               game={room.game}
               paused={room.paused}
@@ -199,17 +192,13 @@ export function GameRoom({ roomId, onLeave }: { roomId: string; onLeave: () => v
               onSkipTurn={() => ws.current.skipTurn()}
               onAddTime={() => ws.current.addTime()}
             />
+            <button className="action-collapse" onClick={() => setPanelCollapsed(true)} aria-label="Collapse panel">▼</button>
           </div>
         </div>
-        <div className={`panel-drawer${panelOpen ? ' panel-open' : ''}`}>
-          <div className="panel-drawer-header">
-            <span>Chat / Log / Ledger</span>
-            <button className="panel-drawer-close" onClick={() => setPanelOpen(false)}>✕</button>
-          </div>
+        <div className={`panel-drawer${panelCollapsed ? ' hidden' : ''}`}>
           <ChatPanel chats={chats} room={room} onSend={(text) => ws.current.chat(text)} />
         </div>
       </div>
-      {panelOpen && <div className="panel-backdrop" onClick={() => setPanelOpen(false)} />}
       {sitForm && (
         <div className="sit-modal-backdrop" onClick={() => setSitForm(undefined)}>
           <form className="sit-modal" onSubmit={submitSit} onClick={(e) => e.stopPropagation()}>

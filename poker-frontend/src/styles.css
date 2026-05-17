@@ -166,13 +166,10 @@ button:disabled { cursor: not-allowed; opacity: .42; }
 .empty-panel.compact { padding: 10px; }
 /* panel-drawer: transparent passthrough on desktop so .side-panel fills the grid cell */
 .panel-drawer { display: contents; }
-.panel-drawer-header { display: none; }
-.panel-drawer-close { display: none; }
-.panel-fab { display: none; }
-.panel-backdrop { display: none; }
 /* bottom-bar: transparent passthrough on desktop */
 .bottom-bar { display: contents; }
-.bottom-bar-chat { display: none; }
+.action-collapse { display: none; }
+.action-expand { display: none; }
 /* desktop: undo display:contents so side-panel behaves as a grid child */
 @supports not (display: contents) { .panel-drawer { display: flex; flex-direction: column; min-height: 0; } }
 .panel-drawer > .side-panel { flex: 1; }
@@ -187,16 +184,14 @@ button:disabled { cursor: not-allowed; opacity: .42; }
     padding-top: env(safe-area-inset-top, 0px);
     overflow: hidden;
   }
-  .topbar { margin: 8px 8px 0; padding: 10px 12px; border-radius: 18px; gap: 10px; }
-  .topbar h2 { font-size: 16px; }
-  .top-actions { width: 100%; justify-content: flex-start; gap: 6px; flex-wrap: wrap; }
-  .top-actions label, .top-actions input { display: none; }
-  .top-actions button { padding: 8px 10px; font-size: 12px; border-radius: 10px; }
-  .top-status { padding: 6px 8px; font-size: 11px; }
+  .topbar { display: none; }
 
-  /* Layout: single flex column, fills remaining height after topbar */
+  /* Layout: single flex column filling the viewport */
   .layout { display: flex; flex-direction: column; margin-top: 0; gap: 0; }
   .layout > div { flex: 1; min-height: 0; }
+
+  /* table-column: the primary flex column — position:relative for the floating expand button */
+  .table-column { display: flex; flex-direction: column; position: relative; }
 
   /* Table stage stretches to fill everything above the action dock.
      Must be a flex container so .poker-table can use flex:1 (height:100% is unreliable on flex items) */
@@ -204,8 +199,8 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .poker-table { flex: 1; min-height: 0; height: auto; border-radius: 20px;
     box-shadow: inset 0 0 0 10px #58351f, inset 0 0 0 18px #2a140c; }
   .table-footer { display: none; }
-  .rail { inset: 24px 36px; border-radius: 14px; }
-  .rail-inner { inset: 60px 90px; border-radius: 10px; }
+  .rail { inset: 16px 24px; border-radius: 12px; }
+  .rail-inner { inset: 48px 70px; border-radius: 8px; }
   .table-center { gap: 6px; }
   .table-info { gap: 6px; }
   .room-chip, .pot-pill, .turn-pill { padding: 5px 9px; font-size: 11px; }
@@ -218,16 +213,16 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .seat-4, .seat-5, .seat-6 { padding-top: 0; padding-bottom: 44px; }
   .seat-2, .seat-3 { padding-top: 0; padding-right: 44px; padding-left: 0; }
   .seat-7, .seat-8 { padding-top: 0; padding-left: 44px; padding-right: 0; }
-  .seat-0 { left: 50%;  top: 91%; }
-  .seat-1 { left: 26%;  top: 83%; }
-  .seat-2 { left: 13%;  top: 65%; }
-  .seat-3 { left: 13%;  top: 38%; }
-  .seat-4 { left: 26%;  top: 17%; }
-  .seat-5 { left: 50%;  top: 9%;  }
-  .seat-6 { left: 74%;  top: 17%; }
-  .seat-7 { left: 87%;  top: 38%; }
-  .seat-8 { left: 87%;  top: 65%; }
-  .seat-9 { left: 74%;  top: 83%; }
+  .seat-0 { left: 50%;  top: 94%; }
+  .seat-1 { left: 26%;  top: 92%; }
+  .seat-2 { left: 11%;  top: 72%; }
+  .seat-3 { left: 11%;  top: 44%; }
+  .seat-4 { left: 26%;  top: 14%; }
+  .seat-5 { left: 50%;  top: 7%;  }
+  .seat-6 { left: 74%;  top: 14%; }
+  .seat-7 { left: 89%;  top: 44%; }
+  .seat-8 { left: 89%;  top: 72%; }
+  .seat-9 { left: 74%;  top: 92%; }
   .seat-panel { width: 104px; padding: 6px 8px; border-radius: 12px; }
   .seat-name { font-size: 11px; }
   .seat-meta { font-size: 10px; gap: 4px; }
@@ -244,7 +239,7 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .sit-button { width: 88px; height: 56px; font-size: 11px; border-radius: 12px; }
   .win-amount { font-size: 12px; padding: 4px 9px; }
 
-  /* Bottom bar — chat button on left, action dock fills the rest */
+  /* Bottom bar — action dock fills the rest; collapses to height:0 when .hidden */
   .bottom-bar {
     display: flex;
     flex-direction: row;
@@ -252,8 +247,44 @@ button:disabled { cursor: not-allowed; opacity: .42; }
     background: rgba(4,14,10,.82);
     border-top: 1px solid rgba(255,255,255,.11);
     padding-bottom: env(safe-area-inset-bottom, 0px);
+    overflow: hidden;
+    transition: height .22s ease;
   }
+  .bottom-bar.hidden { height: 0; padding-bottom: 0; border-top: none; }
   .bottom-bar-chat { display: none; }
+
+  /* Collapse button — right edge of the action bar */
+  .action-collapse {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 36px;
+    color: #7fa090;
+    font-size: 16px;
+    background: transparent;
+  }
+
+  /* Expand button — floating at the bottom of the table, only shown when panel is collapsed */
+  .action-expand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    padding: 10px 22px;
+    border-radius: 999px;
+    background: rgba(4,14,10,.88);
+    border: 1px solid rgba(255,255,255,.22);
+    color: #9fffd0;
+    font-size: 14px;
+    font-weight: 900;
+    white-space: nowrap;
+    box-shadow: 0 4px 20px rgba(0,0,0,.5);
+  }
 
   /* Action dock — flush, inside bottom-bar */
   .action-dock { flex: 1; min-width: 0; margin: 0; padding: 10px 12px; border-radius: 0; border: none; background: transparent; box-shadow: none; }
@@ -266,41 +297,19 @@ button:disabled { cursor: not-allowed; opacity: .42; }
   .quick-bets { gap: 4px; }
   .quick-bets button { padding: 8px 4px; font-size: 12px; border-radius: 10px; }
 
-  /* Panel drawer: HIDDEN from layout flow by default, slides up as a sheet when open */
-  .panel-drawer { display: none; }
-  .panel-drawer.panel-open {
+  /* Panel drawer — inline in the bottom section, collapses with the action bar */
+  .panel-drawer {
     display: flex;
     flex-direction: column;
-    position: fixed;
-    left: 0; right: 0; bottom: 0;
-    height: 75vh; height: 75dvh;
-    z-index: 40;
-    border-radius: 20px 20px 0 0;
+    height: 200px;
+    min-height: 0;
     overflow: hidden;
-    box-shadow: 0 -8px 40px rgba(0,0,0,.55);
-    animation: drawerUp .25s cubic-bezier(.4,0,.2,1) both;
+    border-top: 1px solid rgba(255,255,255,.09);
+    transition: height .22s ease;
   }
-  @keyframes drawerUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-  .panel-drawer.panel-open > .side-panel { flex: 1; min-height: 0; border-radius: 0; border: none; }
-  .panel-drawer-header {
-    display: flex; align-items: center; justify-content: space-between;
-    flex-shrink: 0;
-    padding: 14px 16px 10px;
-    background: rgba(4,14,10,.98);
-    border-bottom: 1px solid rgba(255,255,255,.1);
-    font-weight: 900; color: #e7fff4;
-  }
-  .panel-drawer-close {
-    display: block; padding: 6px 14px;
-    color: #9fb8ae; border-radius: 10px;
-    background: rgba(255,255,255,.1); font-weight: 900;
-  }
-
-  /* Backdrop */
-  .panel-backdrop {
-    display: block; position: fixed; inset: 0;
-    z-index: 35; background: rgba(0,0,0,.6);
-  }
+  .panel-drawer.hidden { height: 0; border-top: none; }
+  .panel-drawer.hidden > .side-panel { display: none; }
+  .panel-drawer > .side-panel { flex: 1; min-height: 0; border-radius: 0; border: none; }
 
   .side-tabs button { padding: 8px 6px; font-size: 12px; border-radius: 12px; }
   .chat-form input { padding: 10px; font-size: 13px; }
